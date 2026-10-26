@@ -1,0 +1,3 @@
+{$PUBLIC_HOST} {
+	reverse_proxy openclaw:18789
+}
