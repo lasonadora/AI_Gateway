@@ -1,0 +1,8 @@
+{
+  "name": "ai-gateway",
+  "private": true,
+  "scripts": {
+    "test": "node --experimental-strip-types --test skills/health/analyze.test.ts ingest/src/hae.test.ts"
+  },
+  "engines": { "node": ">=22.18" }
+}

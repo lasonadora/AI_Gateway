@@ -1,0 +1,49 @@
+// OpenClaw 配置模板（JSON5）。${VAR} 由 entrypoint.sh 用环境变量渲染。
+// 原则：这里只放"我们关心的"几块，其余用 OpenClaw 默认值。
+// 字段以 `openclaw config schema` 为准；启动报错时先看 Railway 日志里的字段名。
+{
+  gateway: {
+    port: ${PORT},
+    bind: "lan",                      // 云端必须是 lan；不要写 0.0.0.0
+    auth: {
+      mode: "token",
+      token: "${OPENCLAW_GATEWAY_TOKEN}",
+    },
+    publicOrigin: "${OPENCLAW_PUBLIC_ORIGIN}",   // Railway 分配的 https 域名
+    controlUi: { enabled: true },
+  },
+
+  agents: {
+    defaults: {
+      // Claude 主力 + 一条备选链；零碎活交给便宜模型
+      model: {
+        primary: "${OPENCLAW_PRIMARY_MODEL}",
+        fallbacks: ["${OPENCLAW_FALLBACK_MODEL}"],
+      },
+      utilityModel: "${OPENCLAW_UTILITY_MODEL}",
+    },
+    entries: {
+      // MVP 只有主 agent。杂事、开发以后各加一个 entry，用 bindings 路由。
+      main: {},
+    },
+  },
+
+  tools: {
+    // 命令执行保留审批，不设 "full"。它拿着你的数据干活。
+    exec: { mode: "approve" },
+  },
+
+  // Notion：agent 读写四个健康库的唯一通道。
+  // 本地 stdio 方式跑官方 MCP server，token 从环境变量来。
+  mcp: {
+    servers: {
+      notion: {
+        command: "npx",
+        args: ["-y", "@notionhq/notion-mcp-server"],
+        env: {
+          NOTION_TOKEN: "${NOTION_TOKEN}",
+        },
+      },
+    },
+  },
+}

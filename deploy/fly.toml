@@ -1,0 +1,27 @@
+# Plan B：Railway 注册不了时用 Fly.io。和 Railway 同一个镜像、同一套环境变量。
+# 用法：fly launch --no-deploy --copy-config --name <你的app名> ；fly volumes create openclaw_data --region sjc --size 3 ；
+#      fly secrets set OPENCLAW_GATEWAY_TOKEN=... ANTHROPIC_API_KEY=... NOTION_TOKEN=... ；fly deploy
+app = "ai-gateway"
+primary_region = "sjc"   # 美西
+
+[build]
+  dockerfile = "deploy/Dockerfile"
+
+[env]
+  OPENCLAW_TZ = "Asia/Shanghai"
+  PORT = "18789"
+
+[http_service]
+  internal_port = 18789
+  force_https = true
+  auto_stop_machines = "off"     # 常驻，不要缩到零
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "openclaw_data"
+  destination = "/home/node/.openclaw"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
