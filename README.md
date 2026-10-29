@@ -59,12 +59,12 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条跑通的）。效果一样：一台常开的小机器跑同一个镜像，Caddy 自动配 HTTPS，不用买域名。
 
 1. 阿里云国际版（alibabacloud.com）→ Simple Application Server → Create Server：套餐选 International 档 2 vCPU / 2 GiB / 40 GiB、流量免费（5.6 美元/月；1 GiB 太紧，0.5 GiB 跑不起来），镜像 Ubuntu 24.04，地域 Singapore。买完在控制台：Server 详情 → Reset Password 设 root 密码；Firewall 确认开了 TCP 22、80、443。记下公网 IP。
-2. GitHub 建一个只读 token 给 VPS 拉代码：Settings → Developer settings → Fine-grained tokens → 只选 AI_Gateway 仓库，权限 Contents: Read。
-3. Mac 终端 `ssh root@<IP>`，粘贴：
+2. 仓库目前是 public，服务器直接 clone 不用 token。以后改成 private 的话，建一个 fine-grained token（只选 AI_Gateway，Contents: Read），clone 地址改成 `https://<token>@github.com/lasonadora/AI_Gateway.git`。
+3. Mac 终端 `ssh root@<IP>`（第一次问 fingerprint 输 yes），粘贴：
 
    ```bash
    apt-get update -qq && apt-get install -y -qq git
-   read -r -p "GitHub token: " GH && git clone "https://$GH@github.com/lasonadora/AI_Gateway.git" /opt/ai_gateway
+   git clone https://github.com/lasonadora/AI_Gateway.git /opt/ai_gateway
    bash /opt/ai_gateway/deploy/vps/setup.sh
    ```
 
