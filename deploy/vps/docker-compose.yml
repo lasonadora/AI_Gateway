@@ -16,6 +16,13 @@ services:
       - openclaw_data:/home/node/.openclaw
     expose:
       - "18789"
+    # 2 GiB 小机器：给容器封顶，宁可容器被杀重启，也别把宿主机（sshd、云助手）一起拖死
+    deploy:
+      resources:
+        limits:
+          memory: 1400M
+    # 不要在这台机器上并行跑 `docker compose exec openclaw openclaw ...`：
+    # CLI 会再起一整套运行时，2 GiB 扛不住（踩过一次，机器直接失联）。
 
   caddy:
     image: caddy:2
