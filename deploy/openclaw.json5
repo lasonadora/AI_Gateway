@@ -3,6 +3,7 @@
 // 字段名已对照 docs.openclaw.ai（gateway / config-agents / tools/mcp / permission-modes）。
 {
   gateway: {
+    mode: "local",                    // 必须显式写，否则 Gateway 拒绝启动（"missing gateway.mode"）
     port: ${PORT},
     bind: "lan",                      // 容器里必须是 lan（反代在另一个容器）；不要写 0.0.0.0
     auth: {
