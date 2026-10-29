@@ -60,7 +60,7 @@ Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条�
 
 1. 阿里云国际版（alibabacloud.com）→ Simple Application Server → Create Server：套餐选 International 档 2 vCPU / 2 GiB / 40 GiB、流量免费（5.6 美元/月；1 GiB 太紧，0.5 GiB 跑不起来），镜像 Ubuntu 24.04，地域 Singapore。买完在控制台：Server 详情 → Reset Password 设 root 密码；Firewall 确认开了 TCP 22、80、443。记下公网 IP。
 2. 仓库目前是 public，服务器直接 clone 不用 token。以后改成 private 的话，建一个 fine-grained token（只选 AI_Gateway，Contents: Read），clone 地址改成 `https://<token>@github.com/lasonadora/AI_Gateway.git`。
-3. Mac 终端 `ssh root@<IP>`（第一次问 fingerprint 输 yes），粘贴：
+3. 第一段不用交互，可以在控制台的 Command Assistant 里跑，也可以 ssh 后粘贴：
 
    ```bash
    apt-get update -qq && apt-get install -y -qq git
@@ -68,9 +68,16 @@ Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条�
    bash /opt/ai_gateway/deploy/vps/setup.sh
    ```
 
-   脚本会装 Docker、问三把钥匙（Gateway token 留空自动生成）、构建启动，最后打印地址和 token。
-4. 之后的步骤同上面"连手机和电脑"和"验收"：地址是 `https://<ip 用横线连>.sslip.io`。
-5. 更新代码：`cd /opt/ai_gateway && git pull && docker compose -f deploy/vps/docker-compose.yml up -d --build`。
+   它装 Docker、加 swap、生成 `.env`（Gateway token 随机生成）、预构建镜像，几分钟。
+4. 第二段要在终端里（ssh 或控制台的 Connect 网页终端）由你本人跑，因为要粘贴两把密钥（输入不回显，不进命令日志）：
+
+   ```bash
+   bash /opt/ai_gateway/deploy/vps/secrets.sh
+   ```
+
+   粘贴 ANTHROPIC_API_KEY、NOTION_TOKEN 各回车一次，它就启动服务并打印地址和 Gateway token。
+5. 之后的步骤同上面"连手机和电脑"和"验收"：地址是 `https://<ip 用横线连>.sslip.io`。
+6. 更新代码：`cd /opt/ai_gateway && git pull && docker compose -f deploy/vps/docker-compose.yml up -d --build`。改密钥：编辑 `deploy/vps/.env` 后同样 `up -d`。
 
 ## 阶段 2：健康数据进 Notion
 

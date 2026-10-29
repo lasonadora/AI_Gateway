@@ -1,48 +1,48 @@
 // OpenClaw 配置模板（JSON5）。${VAR} 由 entrypoint.sh 用环境变量渲染。
 // 原则：这里只放"我们关心的"几块，其余用 OpenClaw 默认值。
-// 字段以 `openclaw config schema` 为准；启动报错时先看 Railway 日志里的字段名。
+// 字段名已对照 docs.openclaw.ai（gateway / config-agents / tools/mcp / permission-modes）。
 {
   gateway: {
     port: ${PORT},
-    bind: "lan",                      // 云端必须是 lan；不要写 0.0.0.0
+    bind: "lan",                      // 容器里必须是 lan（反代在另一个容器）；不要写 0.0.0.0
     auth: {
       mode: "token",
       token: "${OPENCLAW_GATEWAY_TOKEN}",
     },
-    publicOrigin: "${OPENCLAW_PUBLIC_ORIGIN}",   // Railway 分配的 https 域名
+    publicOrigin: "${OPENCLAW_PUBLIC_ORIGIN}",   // 对外 https 地址；不设 allowedOrigins 时 Control UI 就认它
+    trustedProxies: [${OPENCLAW_TRUSTED_PROXIES_JSON}],  // Caddy 的固定 IP，见 deploy/vps/docker-compose.yml
+    allowRealIpFallback: false,
     controlUi: { enabled: true },
   },
 
   agents: {
     defaults: {
-      // Claude 主力 + 一条备选链；零碎活交给便宜模型
+      // Claude 主力 + 一条备选链；零碎活（起标题、摘要）交给便宜模型
       model: {
         primary: "${OPENCLAW_PRIMARY_MODEL}",
         fallbacks: ["${OPENCLAW_FALLBACK_MODEL}"],
       },
-      utilityModel: "${OPENCLAW_UTILITY_MODEL}",
+      utilityModel: {
+        primary: "${OPENCLAW_UTILITY_MODEL}",
+      },
     },
     entries: {
       // MVP 只有主 agent。杂事、开发以后各加一个 entry，用 bindings 路由。
-      main: {},
+      main: { name: "Main Agent" },
     },
   },
 
   tools: {
-    // 命令执行保留审批，不设 "full"。它拿着你的数据干活。
-    exec: { mode: "approve" },
+    // 命令执行：白名单外的命令先问人。不设 "full"——它拿着你的数据干活。
+    exec: { mode: "ask" },
   },
 
   // Notion：agent 读写四个健康库的唯一通道。
-  // 本地 stdio 方式跑官方 MCP server，token 从环境变量来。
+  // 包装脚本会从 ~/.openclaw/.env 读 NOTION_TOKEN（entrypoint 写入），token 不进这份配置。
   mcp: {
     servers: {
       notion: {
-        command: "npx",
-        args: ["-y", "@notionhq/notion-mcp-server"],
-        env: {
-          NOTION_TOKEN: "${NOTION_TOKEN}",
-        },
+        command: "/opt/agent-platform/notion-mcp.sh",
       },
     },
   },

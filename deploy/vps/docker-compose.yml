@@ -1,4 +1,4 @@
-# VPS 部署（Vultr / DigitalOcean / 任意 Ubuntu 机器）
+# VPS 部署（阿里云轻量 / Vultr / 任意 Ubuntu 机器）
 # 两个容器：openclaw（我们的镜像）+ caddy（自动 HTTPS，反代到 Gateway）
 # 用法见 setup.sh；更新：cd /opt/ai_gateway && git pull && docker compose -f deploy/vps/docker-compose.yml up -d --build
 services:
@@ -11,6 +11,7 @@ services:
     environment:
       PORT: "18789"
       OPENCLAW_PUBLIC_ORIGIN: "https://${PUBLIC_HOST}"
+      OPENCLAW_TRUSTED_PROXIES: "172.30.0.10"   # caddy 的固定 IP（下面）
     volumes:
       - openclaw_data:/home/node/.openclaw
     expose:
@@ -28,8 +29,17 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     depends_on:
       - openclaw
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   openclaw_data:
