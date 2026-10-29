@@ -22,9 +22,7 @@
         primary: "${OPENCLAW_PRIMARY_MODEL}",
         fallbacks: ["${OPENCLAW_FALLBACK_MODEL}"],
       },
-      utilityModel: {
-        primary: "${OPENCLAW_UTILITY_MODEL}",
-      },
+      utilityModel: "${OPENCLAW_UTILITY_MODEL}",   // 这个版本要求字符串（启动日志验证过）
     },
     entries: {
       // MVP 只有主 agent。杂事、开发以后各加一个 entry，用 bindings 路由。
