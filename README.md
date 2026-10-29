@@ -54,11 +54,11 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 - Notion MCP 用 `npx` 临时下载官方 server，首次启动慢一点是正常的。
 - 国内访问 Railway 域名和 App Store 可能需要代理；这是你个人的临时问题，不要为它改任何配置。
 
-## 阶段 1 的部署方式 B：VPS（Vultr / DigitalOcean）
+## 阶段 1 的部署方式 B：VPS（阿里云国际版轻量应用服务器）
 
-Railway、Fly 注册或绑卡不顺时走这条。效果一样：一台常开的小机器跑同一个镜像，Caddy 自动配 HTTPS，不用买域名。
+Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条跑通的）。效果一样：一台常开的小机器跑同一个镜像，Caddy 自动配 HTTPS，不用买域名。
 
-1. Vultr 注册（支持支付宝、PayPal）→ Deploy New Server：Cloud Compute，地区 Los Angeles 或 Seattle，系统 Ubuntu 24.04 LTS，套餐 2 vCPU / 2 GB（约 12 美元/月；1 GB 太紧）。记下 IP 和 root 密码。
+1. 阿里云国际版（alibabacloud.com）→ Simple Application Server → Create Server：套餐选 International 档 2 vCPU / 2 GiB / 40 GiB、流量免费（5.6 美元/月；1 GiB 太紧，0.5 GiB 跑不起来），镜像 Ubuntu 24.04，地域 Singapore。买完在控制台：Server 详情 → Reset Password 设 root 密码；Firewall 确认开了 TCP 22、80、443。记下公网 IP。
 2. GitHub 建一个只读 token 给 VPS 拉代码：Settings → Developer settings → Fine-grained tokens → 只选 AI_Gateway 仓库，权限 Contents: Read。
 3. Mac 终端 `ssh root@<IP>`，粘贴：
 

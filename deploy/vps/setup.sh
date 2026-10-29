@@ -12,6 +12,13 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 docker --version && docker compose version
 
+# 小内存机器（2 GiB）加 2 GiB swap，防止构建镜像或 npx 时被 OOM 杀掉
+if [ ! -f /swapfile ] && [ "$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)" -lt 3072 ]; then
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "已加 2 GiB swap"
+fi
+
 echo "== 2/4 公网地址 =="
 IP="$(curl -4 -fsS https://ifconfig.me || hostname -I | awk '{print $1}')"
 PUBLIC_HOST="${PUBLIC_HOST:-$(echo "$IP" | tr . -).sslip.io}"   # 免费域名，自动指向这台机器的 IP
