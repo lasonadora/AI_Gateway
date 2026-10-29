@@ -49,7 +49,9 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 
 ### 可能踩的坑
 
-- 配置字段名以 `openclaw config schema` 的输出为准。启动报错说某个字段不认识，就在 `deploy/openclaw.json5` 里按日志改，重新部署。
+- 配置字段名以 `openclaw config schema` 的输出为准。启动报错说某个字段不认识，就在 `deploy/openclaw.json5` 里按日志改，重新部署。已踩过的：`gateway.mode` 必须显式写 `"local"`；`agents.defaults.utilityModel` 要字符串不要对象；exec 审批是 `tools.exec.mode: "ask"`（没有 `approve` 这个值）。
+- 2 GiB 的机器上别在网关旁边再跑 `openclaw` CLI（`docker compose exec openclaw openclaw ...`）：CLI 会再起一整套运行时，机器会失联到要从控制台强制重启。看状态用 `docker compose logs`、`docker stats`、curl 就够了。
+- 网关稳态约 1 GiB 内存，容器封顶 1.4 GiB（`deploy/vps/docker-compose.yml`）。如果日志里反复出现容器被杀重启，升到 4 GiB 套餐（阿里云轻量 11.2 美元/月）比调参省事。
 - 持久卷权限：启动脚本已 `chown` 给 node 用户。如果日志里有 EACCES，删掉卷重建一次。
 - Notion MCP 用 `npx` 临时下载官方 server，首次启动慢一点是正常的。
 - 国内访问 Railway 域名和 App Store 可能需要代理；这是你个人的临时问题，不要为它改任何配置。
