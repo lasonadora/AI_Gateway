@@ -16,13 +16,15 @@ services:
       - openclaw_data:/home/node/.openclaw
     expose:
       - "18789"
-    # 2 GiB 小机器：给容器封顶，宁可容器被杀重启，也别把宿主机（sshd、云助手）一起拖死
+    # 给容器封顶，宁可容器被杀重启，也别把宿主机（sshd、云助手）一起拖死。
+    # 机器是 4 GiB：留 1 GiB 给系统，容器最多 3 GiB；memswap 和 memory 相等 = 容器不许用 swap，
+    # 超了直接 OOM 重启，不会像 2 GiB 时那样换页把整台机器冻住 90 秒。
     deploy:
       resources:
         limits:
-          memory: 1400M
-    # 不要在这台机器上并行跑 `docker compose exec openclaw openclaw ...`：
-    # CLI 会再起一整套运行时，2 GiB 扛不住（踩过一次，机器直接失联）。
+          memory: 3000M
+    memswap_limit: 3000M
+    # 网关空载约 1 GiB，开会话再加 agent 运行时 + Notion MCP。2 GiB 的机器跑不动（踩过）。
 
   caddy:
     image: caddy:2

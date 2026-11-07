@@ -51,7 +51,7 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 
 - 配置字段名以 `openclaw config schema` 的输出为准。启动报错说某个字段不认识，就在 `deploy/openclaw.json5` 里按日志改，重新部署。已踩过的：`gateway.mode` 必须显式写 `"local"`；`agents.defaults.utilityModel` 要字符串不要对象；exec 审批是 `tools.exec.mode: "ask"`（没有 `approve` 这个值）。
 - 2 GiB 的机器上别在网关旁边再跑 `openclaw` CLI（`docker compose exec openclaw openclaw ...`）：CLI 会再起一整套运行时，机器会失联到要从控制台强制重启。看状态用 `docker compose logs`、`docker stats`、curl 就够了。
-- 网关稳态约 1 GiB 内存，容器封顶 1.4 GiB（`deploy/vps/docker-compose.yml`）。如果日志里反复出现容器被杀重启，升到 4 GiB 套餐（阿里云轻量 11.2 美元/月）比调参省事。
+- 网关空载约 1 GiB，开会话再加 agent 运行时和 Notion MCP。容器封顶 3 GiB 且禁用 swap（`deploy/vps/docker-compose.yml`），超了会 OOM 重启而不是把机器冻住。
 - 持久卷权限：启动脚本已 `chown` 给 node 用户。如果日志里有 EACCES，删掉卷重建一次。
 - Notion MCP 用 `npx` 临时下载官方 server，首次启动慢一点是正常的。
 - 国内访问 Railway 域名和 App Store 可能需要代理；这是你个人的临时问题，不要为它改任何配置。
@@ -60,7 +60,7 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 
 Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条跑通的）。效果一样：一台常开的小机器跑同一个镜像，Caddy 自动配 HTTPS，不用买域名。
 
-1. 阿里云国际版（alibabacloud.com）→ Simple Application Server → Create Server：套餐选 International 档 2 vCPU / 2 GiB / 40 GiB、流量免费（5.6 美元/月；1 GiB 太紧，0.5 GiB 跑不起来），镜像 Ubuntu 24.04，地域 Singapore。买完在控制台：Server 详情 → Reset Password 设 root 密码；Firewall 确认开了 TCP 22、80、443。记下公网 IP。
+1. 阿里云国际版（alibabacloud.com）→ Simple Application Server → Create Server：套餐选 International 档 2 vCPU / 4 GiB / 50 GiB、流量免费（11.2 美元/月。2 GiB 的 5.6 美元档实测跑不动：网关空载 1 GiB，开会话就换页冻住），镜像 Ubuntu 24.04，地域 Singapore。买完在控制台：Server 详情 → Reset Password 设 root 密码；Firewall 确认开了 TCP 22、80、443。记下公网 IP。
 2. 仓库目前是 public，服务器直接 clone 不用 token。以后改成 private 的话，建一个 fine-grained token（只选 AI_Gateway，Contents: Read），clone 地址改成 `https://<token>@github.com/lasonadora/AI_Gateway.git`。
 3. 第一段不用交互，可以在控制台的 Command Assistant 里跑，也可以 ssh 后粘贴：
 
