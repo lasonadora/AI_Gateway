@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mealSlot, localTime, parseAnalysis, notionType } from "./photo.ts";
+import { mealSlot, localTime, parseAnalysis, notionType, iconFor } from "./photo.ts";
 
 test("mealSlot：按本地时间分餐次", () => {
   assert.equal(mealSlot(7, 30), "早餐");
@@ -32,7 +32,7 @@ test("parseAnalysis：饭，过滤不合法类别，截断标题", () => {
   \`\`\``);
   assert.equal(a.kind, "meal");
   assert.deepEqual(a.categories, ["主食", "蛋白", "蔬菜"]);
-  assert.deepEqual(a.flags, ["大份"]);
+  assert.deepEqual(a.flags, ["大份"]); // 模型给的「大份」「瞎编」都丢掉，份量为大时由代码补「大份」
   assert.equal(a.portion, "大");
   assert.equal(a.calorie_band, "重");
   assert.equal(a.bristol, null);
@@ -55,6 +55,20 @@ test("parseAnalysis：排便，Bristol 取整夹到 1-7，自动补腹泻/便秘
   const b = parseAnalysis(`{"kind":"stool","title":"排便","bristol":1,"flags":[],"confidence":0.9,"notes":"","red_flag":false}`);
   assert.deepEqual(b.flags, ["便秘"]);
   assert.equal(b.red_flag, false);
+});
+
+test("parseAnalysis：夜宵由代码决定，模型给的夜宵丢掉", () => {
+  const a = parseAnalysis(`{"kind":"meal","title":"面","items":["面"],"categories":["主食"],"portion":"中","flags":["夜宵"],"confidence":0.8,"notes":"","red_flag":false}`);
+  assert.deepEqual(a.flags, []);
+});
+
+test("notionType / iconFor：饮品按咖啡因、酒精分类", () => {
+  assert.equal(notionType("drink", ["咖啡因"]), "咖啡因");
+  assert.equal(notionType("drink", ["酒精", "糖饮"]), "酒精");
+  assert.equal(notionType("drink", ["糖饮"]), "饮食");
+  assert.equal(notionType("meal", ["酒精"]), "饮食");
+  assert.equal(notionType("stool"), "排便");
+  assert.equal(iconFor("stool"), "🚽");
 });
 
 test("parseAnalysis：其他 / 坏输出", () => {

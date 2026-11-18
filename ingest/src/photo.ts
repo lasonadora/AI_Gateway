@@ -75,8 +75,10 @@ JSON 字段（全部必填，不适用的填 null 或空数组）：
 }
 
 规则：
-- portion 以一个成年人一餐的量为"中"。calorie_band：轻 ≈ 400 千卡以下，中 ≈ 400–800，重 ≈ 800 以上，只是粗档位。
-- 明显外卖包装/餐盒 → categories 加「外卖」；油炸食物 → 加「油炸」；含糖饮料/奶茶 → 「糖饮」；咖啡/浓茶 → 「咖啡因」；酒 → 「酒精」。
+- items 要把画面里每一样吃的都列出来（主菜、配菜、主食、汤、饮料、酱料都算），中式菜名用常见叫法。
+- categories 必须覆盖 items 里的每一样：米饭/面/馒头/饺子/面包/粉 → 主食；肉/鱼/虾/蛋/豆腐/火腿/香肠 → 蛋白；叶菜/根茎/菌菇 → 蔬菜；水果 → 水果；奶/酸奶/奶酪 → 乳制品；含糖饮料/奶茶/果汁 → 糖饮；咖啡/浓茶/能量饮料 → 咖啡因；酒 → 酒精；薯片/糕点/糖果 → 零食；油炸或明显重油 → 油炸；外卖包装/一次性餐盒 → 外卖。一样东西可以同时属于多个类别。
+- portion 以一个成年人一餐的量为"中"。calorie_band：轻 ≈ 400 千卡以下，中 ≈ 400–800，重 ≈ 800 以上，只是粗档位；主食和油多就往上走。
+- 「夜宵」「大份」这两个 flag 不要你判断：夜宵由时间决定，大份只在 portion 为「大」时由系统加。
 - 排便用 Bristol 分型：1 硬球状难排、2 结块香肠状、3 香肠状表面有裂纹、4 光滑柔软香肠状（理想）、5 软团块边缘清楚、6 糊状边缘不清、7 水样无固体。
 - 排便 flags：看到鲜红或暗红 → 「带血」；柏油样黑亮 → 「黑便」；6 或 7 型 → 「腹泻」；1 或 2 型 → 「便秘」；灰白、陶土色、明显绿色 → 「颜色异常」。
 - 「带血」或「黑便」时 red_flag = true，notes 里说明"建议尽快就医"。其余 red_flag = false。
@@ -110,7 +112,8 @@ export function parseAnalysis(raw: string): Analysis {
   let confidence = num(obj.confidence) ?? 0.5;
   confidence = Math.min(1, Math.max(0, confidence));
 
-  const flags = strArr(obj.flags, FLAGS);
+  // 「夜宵」「大份」由代码按时间/份量决定，模型给的一律丢掉
+  const flags = strArr(obj.flags, FLAGS).filter((f) => f !== "夜宵" && f !== "大份");
   const red = obj.red_flag === true || flags.includes("带血") || flags.includes("黑便");
 
   const a: Analysis = {
@@ -131,12 +134,23 @@ export function parseAnalysis(raw: string): Analysis {
     if (a.bristol >= 6 && !a.flags.includes("腹泻")) a.flags.push("腹泻");
     if (a.bristol <= 2 && !a.flags.includes("便秘")) a.flags.push("便秘");
   }
+  if ((a.kind === "meal" || a.kind === "drink") && a.portion === "大") a.flags.push("大份");
   return a;
 }
 
-/** Notion 的 type 选项 */
-export function notionType(kind: Kind): "饮食" | "排便" | "其他" {
-  if (kind === "meal" || kind === "drink") return "饮食";
+/** Notion 的 type 选项：饮品按内容归到 酒精 / 咖啡因，其余饮食 */
+export function notionType(kind: Kind, categories: string[] = []): "饮食" | "排便" | "酒精" | "咖啡因" | "其他" {
+  if (kind === "drink") {
+    if (categories.includes("酒精")) return "酒精";
+    if (categories.includes("咖啡因")) return "咖啡因";
+    return "饮食";
+  }
+  if (kind === "meal") return "饮食";
   if (kind === "stool") return "排便";
   return "其他";
+}
+
+/** Notion 页面图标 */
+export function iconFor(kind: Kind): string {
+  return kind === "stool" ? "🚽" : kind === "drink" ? "🥤" : kind === "meal" ? "🍽️" : "📷";
 }

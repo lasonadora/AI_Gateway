@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 
 import { aggregate, type Daily } from "./hae.ts";
-import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, type Analysis } from "./photo.ts";
+import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, iconFor, type Analysis } from "./photo.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -114,11 +114,12 @@ function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: s
   const p: Record<string, any> = {
     text: { title: [{ text: { content: a.title } }] },
     datetime: { date: { start: iso } },
-    type: { select: { name: notionType(a.kind) } },
+    type: { select: { name: notionType(a.kind, a.categories) } },
     source: { select: { name: "手机拍照" } },
     confidence: { number: Math.round(a.confidence * 100) / 100 },
-    agent_note: { rich_text: [{ text: { content: JSON.stringify({ kind: a.kind, items: a.items, model: VISION_MODEL }).slice(0, 1900) } }] },
+    agent_note: { rich_text: [{ text: { content: `${a.notes} [${VISION_MODEL}]`.slice(0, 1900) } }] },
   };
+  if (a.items.length) p.items = { rich_text: [{ text: { content: a.items.join("、").slice(0, 1900) } }] };
   const set = (k: string, v: any) => v !== undefined && (p[k] = v);
   if (a.kind === "meal" || a.kind === "drink") {
     set("meal", sel(meal));
@@ -132,10 +133,11 @@ function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: s
   return p;
 }
 
-function logBody(a: Analysis) {
+function logBody(a: Analysis, note?: string) {
   const lines: string[] = [];
   if (a.notes) lines.push(a.notes);
   if (a.items.length) lines.push(`识别：${a.items.join("、")}`);
+  if (note?.trim()) lines.push(`你说：${note.trim()}`);
   if (a.red_flag) lines.push("⚠️ 看到了需要注意的迹象，建议尽快就医。这不是诊断。");
   return lines.map((t) => ({ object: "block", type: "paragraph", paragraph: { rich_text: [{ text: { content: t.slice(0, 1900) } }] } }));
 }
@@ -223,8 +225,9 @@ app.post("/ingest/photo", async (c) => {
       }
       const page: any = await notion.pages.create({
         parent: { type: "data_source_id", data_source_id: LOG_DS },
+        icon: { type: "emoji", emoji: iconFor(analysis.kind) },
         properties: logProps(analysis, t.iso, meal, uploadId, `${stem}.jpg`),
-        children: logBody(analysis),
+        children: logBody(analysis, note),
       } as any);
       notionUrl = page.url ?? null;
     } catch (e: any) {
