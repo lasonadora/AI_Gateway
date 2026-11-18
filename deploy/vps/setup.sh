@@ -39,12 +39,13 @@ else
   cat > .env <<EOF
 PUBLIC_HOST=$PUBLIC_HOST
 OPENCLAW_GATEWAY_TOKEN=$(openssl rand -hex 24)
+INGEST_TOKEN=$(openssl rand -hex 16)
 ANTHROPIC_API_KEY=
 NOTION_TOKEN=
 OPENCLAW_TZ=${OPENCLAW_TZ:-Asia/Shanghai}
 EOF
   umask 022
-  echo "已生成 .env（Gateway token 已随机生成；两把 API 密钥待填）"
+  echo "已生成 .env（Gateway token、INGEST_TOKEN 已随机生成；两把 API 密钥待填）"
 fi
 
 echo "== 4/4 预构建镜像 =="

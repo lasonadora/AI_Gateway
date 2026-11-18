@@ -1,3 +1,9 @@
 {$PUBLIC_HOST} {
-	reverse_proxy openclaw:18789
+	# 手机拍照 / Health Auto Export → 接收端；其余全部 → OpenClaw 网关
+	handle /ingest/* {
+		reverse_proxy ingest:8787
+	}
+	handle {
+		reverse_proxy openclaw:18789
+	}
 }

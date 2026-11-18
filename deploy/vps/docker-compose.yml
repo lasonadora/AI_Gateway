@@ -26,6 +26,28 @@ services:
     memswap_limit: 3000M
     # 网关空载约 1 GiB，开会话再加 agent 运行时 + Notion MCP。2 GiB 的机器跑不动（踩过）。
 
+  ingest:
+    build:
+      context: ../..
+      dockerfile: ingest/Dockerfile
+    restart: unless-stopped
+    env_file: .env            # 用到 NOTION_TOKEN / ANTHROPIC_API_KEY / INGEST_TOKEN
+    environment:
+      PORT: "8787"
+      NOTION_DAILY_DATA_SOURCE_ID: "9ffc0fca-38de-4711-a83d-d0046349e249"
+      NOTION_LOG_DATA_SOURCE_ID: "17dca1b3-1334-4082-ae85-8cb1de5e5978"
+      VISION_MODEL: "claude-sonnet-5-5"
+      PHOTO_DIR: /data/photos
+      TZ: "${OPENCLAW_TZ:-Asia/Shanghai}"
+    volumes:
+      - ingest_data:/data       # 原图 + log.jsonl，全部留档
+    expose:
+      - "8787"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -43,6 +65,7 @@ services:
         ipv4_address: 172.30.0.10
     depends_on:
       - openclaw
+      - ingest
 
 networks:
   default:
@@ -52,5 +75,6 @@ networks:
 
 volumes:
   openclaw_data:
+  ingest_data:
   caddy_data:
   caddy_config:

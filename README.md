@@ -83,9 +83,29 @@ Railway、Fly、Vultr 注册或绑卡都不顺时走这条（实际就是这条�
 
 ## 阶段 2：健康数据进 Notion
 
+接收端 `ingest/` 在 VPS 上作为第二个容器跑，Caddy 把 `/ingest/*` 路由给它（`deploy/vps/Caddyfile`）。它的密码是 `deploy/vps/.env` 里的 `INGEST_TOKEN`。
+
+### 2a. 手机一键拍照 → 记录库（饭 / 饮品 / 排便）
+
+链路：iPhone 快捷指令拍照 → `POST /ingest/photo` → 原图落盘（`ingest_data` 卷，`/data/photos/年/月/日/`，另有 `log.jsonl` 流水）→ 视觉模型识别（`VISION_MODEL`）→ Notion「记录」一行（type 饮食/排便，附照片、类别、份量、热量档位、Bristol、红旗）。餐次按本地时间由代码判定（`ingest/src/photo.ts`），不让模型猜。照片既不是饭也不是排便的只留档不进库。
+
+iPhone 快捷指令（装一次，之后一键）：
+
+1. 快捷指令 app → `+` → 名字「记录」，依次加 4 个动作：
+   - **拍照**：相机 后置，关掉"显示相机预览"也行（直接拍更快）
+   - **转换图像**：格式 JPEG，质量 0.6（Apple 相机默认 HEIC，服务器不收）
+   - **获取 URL 内容**：URL `https://<你的域名>/ingest/photo`，方法 POST，头部 `Authorization` = `Bearer <INGEST_TOKEN>`，请求体 表单：字段 `photo`（文件 = 上一步的图像）
+   - **显示通知**：标题「已记录」，正文 = 上一步结果里的 `message`（用"获取词典值"取 `message`）
+2. 放到顺手的地方：设置 → 操作按钮 → 快捷指令「记录」；或锁屏小组件；或快捷指令详情里开"在 Apple Watch 上显示"。
+3. 测试：拍一张饭、一张便便，看 Notion 记录库是否各多一行、通知文字是否合理。
+
+排错：`docker compose -f deploy/vps/docker-compose.yml logs -f ingest`；`curl https://<域名>/ingest/health` 应返回 `{"ok":true,...}`。415 = 没转 JPEG；401 = token 不对；502 = 模型调用失败（看日志）。
+
+### 2b. 手表数据 → 每日指标库
+
 完成标志：每日指标库连续 3 天自动出现昨天和今天两行。
 
-1. Railway 同一个 Project → New Service → 同一个仓库，Dockerfile Path 填 `ingest/Dockerfile`，Variables 按 `ingest/.env.example`，生成域名。
+1. 接收端已随 2a 部署，地址同上。
 2. iPhone 装 Health Auto Export（买断约 25 美元，自动化要付费版）。Automations → 新建 → 类型 REST API：
    - URL：`https://接收端域名/ingest/hae`
    - Headers：`Authorization: Bearer <INGEST_TOKEN>`
