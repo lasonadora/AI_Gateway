@@ -24,6 +24,14 @@ if [ "${#missing[@]}" -gt 0 ]; then
   done
 fi
 
+# 可选：手机推送（Bark）。没配就只写 Notion、不推手机；直接回车跳过。
+if [ -t 0 ] && ! has BARK_KEY; then
+  grep -q '^BARK_KEY=' .env || echo 'BARK_KEY=' >> .env
+  read -r -s -p "BARK_KEY（可选，iPhone 上 Bark app 的 device key；直接回车跳过）: " v; echo
+  v="${v//[$'\r\n\t ']/}"
+  if [ -n "$v" ]; then sed -i "s|^BARK_KEY=.*|BARK_KEY=$v|" .env; echo "BARK_KEY 已写入"; else echo "跳过手机推送"; fi
+fi
+
 echo "== 启动 =="
 docker compose up -d --build
 sleep 8

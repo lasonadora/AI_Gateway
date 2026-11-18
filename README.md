@@ -115,13 +115,29 @@ iPhone 快捷指令（装一次，之后一键）：
 3. 点一次"立即运行"，看接收端 Logs 里的 `[ingest] {...}`，Notion 每日指标库应出现两行。
 4. 本地验证接收端逻辑：`cd ingest && npm install && npm test`。
 
-## 阶段 3：日报
+### 2c. 每天 21:30 饮食 + 排便日报 → 报告库 + 推手机
 
-完成标志：07:30 的 automation 跑出第一份日报进报告库，并推到手机。
+接收端自带定时器（`REPORT_TIME`，默认 21:30 本地时间），到点把当天「记录」里的饮食 / 排便拉下来：数字全在代码里算（`ingest/src/report.ts`：正餐去重、五大类覆盖、均衡度 = 覆盖数 × 20、Bristol、固定规则的异常列表），模型只负责写一句话总结 + 2–4 条观察 + 1 条明天的建议（`REPORT_MODEL`，默认同 `VISION_MODEL`）。结果写进「报告」库一行（type 日报，正文里每条记录都是可点的链接），同一天重跑会把旧的归档再建新的。一条记录都没有的日子不建页，只提醒。
+
+推送到 iPhone 用 **Bark**（App Store 免费，国内直连，走 APNs）：装好 → 首页复制 device key → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `BARK_KEY` → 会重启服务。没配 Bark 就只写 Notion。配了以后，排便识别出带血 / 黑便会**立刻**推一条，不等日报。
+
+手动跑 / 排错：
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $INGEST_TOKEN" "https://<域名>/ingest/report/run?date=2026-11-18"   # 重跑某天（加 &push=0 不推手机）
+curl -s -H "Authorization: Bearer $INGEST_TOKEN" https://<域名>/ingest/report/latest                       # 最近一份的摘要
+curl -s https://<域名>/ingest/health   # report_time / push 字段能看出配置是否生效
+```
+
+本机流水：`/data/photos/reports.jsonl`，定时器状态：`/data/photos/report-state.json`（删掉它当天会再跑一次）。回美国后改 `.env` 里的 `OPENCLAW_TZ`，日报时间跟着时区走。
+
+## 阶段 3：身体指标日报（手表数据接上之后）
+
+完成标志：07:30 的 automation 跑出第一份身体指标日报进报告库，并推到手机。
 
 1. 技能已随镜像进工作区（`skills/health/`）。本地跑测试：`node --experimental-strip-types --test skills/health/analyze.test.ts`（Node 24 不用加 flag）。
 2. 手动试一次：在手机上说"跑一下今天的日报"，agent 应按 SKILL.md 的流程执行，报告库多一行。
-3. 建 automation（Control UI 或 CLI）：`openclaw automations add --cron "30 7 * * *" --tz Asia/Shanghai --announce <你的手机会话> "按 health 技能生成昨天的日报"`。周报：`--cron "0 9 * * 0"`。
+3. 建 automation（Control UI 或 CLI）：`openclaw automations add --cron "30 7 * * *" --tz Asia/Shanghai "按 health 技能生成昨天的日报"`。周报：`--cron "0 9 * * 0"`。注意：官方 iOS app 不是 cron 的投递渠道（它的推送只用于后台唤醒），推手机仍走 2c 的 Bark。
 4. 回美国后改 `OPENCLAW_TZ` 和 automation 的 `--tz`。
 
 ## 阶段 4：记录、照片、周报、异常验证

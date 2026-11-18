@@ -1,16 +1,20 @@
-// 健康数据接收端（Hono + 官方 Notion SDK v5）。两个入口：
-//   POST /ingest/hae    Health Auto Export 每小时推 Apple Health 数据 → Notion「每日指标」upsert（纯搬运，不调模型）
-//   POST /ingest/photo  手机一键拍照 → 视觉模型识别（饭 / 饮品 / 排便） → 原图存盘 + Notion「记录」一行（附照片）
+// 健康数据接收端（Hono + 官方 Notion SDK v5）。入口：
+//   POST /ingest/hae         Health Auto Export 每小时推 Apple Health 数据 → Notion「每日指标」upsert（纯搬运，不调模型）
+//   POST /ingest/photo       手机一键拍照 → 视觉模型识别（饭 / 饮品 / 排便） → 原图存盘 + Notion「记录」一行（附照片）
+//   POST /ingest/report/run  手动跑某天日报（?date=YYYY-MM-DD&push=0）
+//   GET  /ingest/report/latest 最近一份日报的摘要（给快捷指令用）
+//   每天 REPORT_TIME（默认 21:30）自动跑当天日报 → Notion「报告」一行 + Bark 推送到手机（配了 BARK_KEY 才推）
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { Client } from "@notionhq/client";
-import { mkdir, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, writeFile, appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 
 import { aggregate, type Daily } from "./hae.ts";
 import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, iconFor, type Analysis } from "./photo.ts";
+import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserPrompt, parseNarrative, pushText, reportBlocks, reportProps, type DayStats, type Narrative } from "./report.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -24,13 +28,50 @@ const LOG_DS = env("NOTION_LOG_DATA_SOURCE_ID"); // 记录库
 const INGEST_TOKEN = env("INGEST_TOKEN"); // 手机/HAE 请求头里带的密码
 const ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY");
 const VISION_MODEL = process.env.VISION_MODEL || "claude-sonnet-5-5";
+const REPORT_MODEL = process.env.REPORT_MODEL || VISION_MODEL;
 const PHOTO_DIR = process.env.PHOTO_DIR || "/data/photos";
 const TZ = process.env.TZ || "Asia/Shanghai";
+const REPORT_DS = process.env.NOTION_REPORT_DATA_SOURCE_ID || ""; // 报告库；没配就不出日报
+const REPORT_TIME = /^\d{2}:\d{2}$/.test(process.env.REPORT_TIME ?? "") ? (process.env.REPORT_TIME as string) : "21:30";
+const BARK_KEY = process.env.BARK_KEY || ""; // iPhone 推送（Bark app 的 device key）；空 = 不推
+const BARK_SERVER = (process.env.BARK_SERVER || "https://api.day.app").replace(/\/$/, "");
+const STATE_FILE = join(PHOTO_DIR, "report-state.json");
 
 const notion = new Client({ auth: NOTION_TOKEN, notionVersion: "2025-09-03" });
 const app = new Hono();
 
 const authed = (c: any) => (c.req.header("authorization") ?? "") === `Bearer ${INGEST_TOKEN}`;
+
+// ---------- 文本模型（日报点评） ----------
+
+async function askModel(system: string, user: string, maxTokens = 600): Promise<string> {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: REPORT_MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
+  });
+  if (!res.ok) throw new Error(`模型调用失败 ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data: any = await res.json();
+  return (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+}
+
+// ---------- 手机推送（Bark） ----------
+
+async function pushPhone(title: string, body: string, url?: string | null, level: "active" | "timeSensitive" = "active"): Promise<boolean> {
+  if (!BARK_KEY) return false;
+  try {
+    const res = await fetch(`${BARK_SERVER}/push`, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ device_key: BARK_KEY, title, body, group: "健康", level, ...(url ? { url } : {}) }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
+    return true;
+  } catch (e: any) {
+    console.error("[push] 失败", e?.message ?? e);
+    return false;
+  }
+}
 
 // ---------- 每日指标 upsert（Health Auto Export） ----------
 
@@ -145,7 +186,6 @@ function logBody(a: Analysis, note?: string) {
 // ---------- 路由 ----------
 
 app.get("/health", (c) => c.json({ ok: true }));
-app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ }));
 
 app.post("/ingest/hae", async (c) => {
   if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
@@ -243,6 +283,9 @@ app.post("/ingest/photo", async (c) => {
   );
   console.log(`[photo] ${t.iso} ${analysis.kind} "${analysis.title}" conf=${analysis.confidence} notion=${notionUrl ?? notionError ?? "skip"}`);
 
+  // 带血 / 黑便：不等日报，立刻推一条（配了 Bark 才会推）
+  if (analysis.red_flag) void pushPhone("⚠️ 排便记录有异常标记", `${analysis.flags.join("、")}。建议尽快就医，这不是诊断。`, notionUrl, "timeSensitive");
+
   // 6) 给手机的一句话（快捷指令弹通知用）
   const headline =
     analysis.kind === "other"
@@ -254,5 +297,143 @@ app.post("/ingest/photo", async (c) => {
   return c.json({ ok: !notionError, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl });
 });
 
+// ---------- 日报 ----------
+
+interface ReportState {
+  last_daily?: string; // 最近一次自动日报的日期
+  latest?: { date: string; title: string; body: string; summary: string; suggestion: string; notion_url: string | null; generated_at: string };
+}
+
+async function loadState(): Promise<ReportState> {
+  try {
+    return JSON.parse(await readFile(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+async function saveState(s: ReportState) {
+  await mkdir(PHOTO_DIR, { recursive: true });
+  await writeFile(STATE_FILE, JSON.stringify(s));
+}
+
+async function fetchDayEntries(ymd: string) {
+  const w = dayWindow(ymd, TZ);
+  const pages: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const res: any = await notion.dataSources.query({
+      data_source_id: LOG_DS,
+      filter: { and: [{ property: "datetime", date: { on_or_after: w.start } }, { property: "datetime", date: { on_or_before: w.end } }] },
+      sorts: [{ property: "datetime", direction: "ascending" }],
+      page_size: 100,
+      start_cursor: cursor,
+    } as any);
+    pages.push(...(res.results ?? []));
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  return pages.map((p) => fromNotionPage(p, TZ));
+}
+
+/** 同一天重跑：把旧的日报页归档，再建新的（替换正文比追加省事也不留垃圾）。 */
+async function archiveOldReports(ymd: string) {
+  const res: any = await notion.dataSources.query({
+    data_source_id: REPORT_DS,
+    filter: { and: [{ property: "date", title: { equals: ymd } }, { property: "type", select: { equals: "日报" } }] },
+    page_size: 10,
+  } as any);
+  for (const p of res.results ?? []) await notion.pages.update({ page_id: p.id, archived: true } as any);
+}
+
+async function runDailyReport(ymd: string, opts: { push: boolean; cutoff?: string }) {
+  if (!REPORT_DS) throw new Error("没配 NOTION_REPORT_DATA_SOURCE_ID");
+  const now = localTime(new Date(), TZ);
+  const cutoff = opts.cutoff ?? (now.ymd === ymd ? now.iso.slice(11, 16) : "23:59");
+  const entries = await fetchDayEntries(ymd);
+  const stats: DayStats = summarize(entries, ymd, cutoff);
+
+  if (!entries.length) {
+    // 一条记录都没有：不建空页，只提醒一句
+    const pushed = opts.push ? await pushPhone(`日报 ${ymd.slice(5).replace("-", "/")}`, "今天一条记录都没有。吃饭、排便记得拍一下。") : false;
+    console.log(`[report] ${ymd} 无记录 pushed=${pushed}`);
+    return { ok: true, date: ymd, empty: true, pushed };
+  }
+
+  let narrative: Narrative;
+  try {
+    narrative = parseNarrative(await askModel(REPORT_SYSTEM_PROMPT, reportUserPrompt(stats)), stats);
+  } catch (e: any) {
+    console.error("[report] 模型失败，用规则兜底", e?.message ?? e);
+    narrative = parseNarrative("", stats);
+  }
+
+  await archiveOldReports(ymd);
+  const page: any = await notion.pages.create({
+    parent: { type: "data_source_id", data_source_id: REPORT_DS },
+    icon: { type: "emoji", emoji: stats.red_flag ? "⚠️" : "📋" },
+    properties: reportProps(stats, narrative, REPORT_MODEL),
+    children: reportBlocks(stats, narrative, REPORT_MODEL),
+  } as any);
+  const notionUrl: string | null = page.url ?? null;
+
+  const text = pushText(stats, narrative);
+  const pushed = opts.push ? await pushPhone(text.title, text.body, notionUrl, stats.red_flag ? "timeSensitive" : "active") : false;
+
+  const state = await loadState();
+  state.latest = { date: ymd, ...text, summary: narrative.summary, suggestion: narrative.suggestion, notion_url: notionUrl, generated_at: new Date().toISOString() };
+  await saveState(state);
+  await appendFile(join(PHOTO_DIR, "reports.jsonl"), JSON.stringify({ at: new Date().toISOString(), date: ymd, cutoff, notion: notionUrl, pushed, narrative, anomalies: stats.anomalies, balance: stats.balance_score }) + "\n");
+  console.log(`[report] ${ymd} entries=${entries.length} balance=${stats.balance_score} anomalies=${stats.anomalies.length} model=${narrative.from_model} pushed=${pushed} notion=${notionUrl}`);
+  return { ok: true, date: ymd, cutoff, entries: entries.length, balance_score: stats.balance_score, anomalies: stats.anomalies, narrative, notion_url: notionUrl, pushed };
+}
+
+let reportRunning = false;
+async function reportGuarded(ymd: string, opts: { push: boolean; cutoff?: string }) {
+  if (reportRunning) throw new Error("上一份日报还在生成");
+  reportRunning = true;
+  try {
+    return await runDailyReport(ymd, opts);
+  } finally {
+    reportRunning = false;
+  }
+}
+
+app.post("/ingest/report/run", async (c) => {
+  if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
+  const q = c.req.query();
+  const ymd = /^\d{4}-\d{2}-\d{2}$/.test(q.date ?? "") ? (q.date as string) : localTime(new Date(), TZ).ymd;
+  const push = q.push !== "0";
+  try {
+    return c.json(await reportGuarded(ymd, { push }));
+  } catch (e: any) {
+    console.error("[report] 失败", e?.message ?? e);
+    return c.json({ error: String(e?.message ?? e) }, 500);
+  }
+});
+
+app.get("/ingest/report/latest", async (c) => {
+  if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
+  const s = await loadState();
+  return c.json(s.latest ?? { empty: true, message: "还没有生成过日报" });
+});
+
+// 每 30 秒看一眼表：到点了、今天还没跑过 → 跑。容器重启错过了时间也会在当天补跑。
+async function tickScheduler() {
+  if (!REPORT_DS) return;
+  const now = localTime(new Date(), TZ);
+  if (now.iso.slice(11, 16) < REPORT_TIME) return;
+  const state = await loadState();
+  if (state.last_daily === now.ymd) return;
+  state.last_daily = now.ymd; // 先记账，失败也不要每 30 秒重试刷模型
+  await saveState(state);
+  try {
+    await reportGuarded(now.ymd, { push: true });
+  } catch (e: any) {
+    console.error("[report] 定时任务失败", e?.message ?? e);
+  }
+}
+setInterval(() => void tickScheduler().catch((e) => console.error("[report] tick", e)), 30_000);
+
+app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ, report_time: REPORT_TIME, report_db: Boolean(REPORT_DS), push: BARK_KEY ? "bark" : "none" }));
+
 const port = Number(process.env.PORT ?? 8787);
-serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ}`));
+serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ} report=${REPORT_TIME} push=${BARK_KEY ? "bark" : "none"}`));
