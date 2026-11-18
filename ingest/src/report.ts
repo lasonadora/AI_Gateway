@@ -254,24 +254,21 @@ const h2 = (t: string) => block("heading_2", [txt(t)]);
 const bullet = (rt: any[]) => block("bulleted_list_item", rt);
 const para = (t: string) => block("paragraph", [txt(t)]);
 
+/** 一行一条记录：时间 · 餐次 · [页面 mention（标题）] · 份量/热量档 · 标记。mention 会显示页面标题，所以不再重复写食物。 */
 function entryLine(e: LogEntry): any[] {
-  const bits: string[] = [e.hm];
-  if (e.meal) bits.push(e.meal);
-  if (e.items.length) bits.push(e.items.join("、"));
-  else bits.push(e.title);
-  const tail = [e.portion, e.calorie_band].filter(Boolean).join("/");
-  if (tail) bits.push(tail);
-  if (e.flags.length) bits.push(e.flags.join(" "));
-  const rt: any[] = [txt(`${bits.join(" · ")}  `)];
-  if (e.id) rt.push(mention(e.id));
+  const head = [e.hm, e.meal].filter(Boolean).join(" · ");
+  const tail = [[e.portion, e.calorie_band].filter(Boolean).join("/"), e.flags.join(" ")].filter(Boolean).join(" · ");
+  const rt: any[] = [txt(`${head} · `)];
+  rt.push(e.id ? mention(e.id) : txt(e.items.length ? e.items.join("、") : e.title));
+  if (tail) rt.push(txt(` · ${tail}`));
   return rt;
 }
 
 function stoolLine(e: LogEntry): any[] {
-  const bits = [e.hm, `Bristol ${e.bristol ?? "?"}`];
-  if (e.flags.length) bits.push(e.flags.join(" "));
-  const rt: any[] = [txt(`${bits.join(" · ")}  `)];
-  if (e.id) rt.push(mention(e.id));
+  const tail = [`Bristol ${e.bristol ?? "?"}`, e.flags.join(" ")].filter(Boolean).join(" · ");
+  const rt: any[] = [txt(`${e.hm} · `)];
+  rt.push(e.id ? mention(e.id) : txt(e.title));
+  rt.push(txt(` · ${tail}`));
   return rt;
 }
 
@@ -290,7 +287,7 @@ export function reportBlocks(s: DayStats, n: Narrative, model: string): any[] {
 
   if (s.others.length) {
     out.push(h2("其他记录"));
-    for (const e of s.others) out.push(bullet([txt(`${e.hm} · ${e.type} · ${e.title}  `), ...(e.id ? [mention(e.id)] : [])]));
+    for (const e of s.others) out.push(bullet([txt(`${e.hm} · ${e.type} · `), e.id ? mention(e.id) : txt(e.title)]));
   }
 
   out.push(h2("统计"));
