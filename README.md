@@ -51,6 +51,8 @@ ingest/          健康数据接收端：Health Auto Export → Notion 每日指
 
 - 配置字段名以 `openclaw config schema` 的输出为准。启动报错说某个字段不认识，就在 `deploy/openclaw.json5` 里按日志改，重新部署。已踩过的：`gateway.mode` 必须显式写 `"local"`；`agents.defaults.utilityModel` 要字符串不要对象；exec 审批是 `tools.exec.mode: "ask"`（没有 `approve` 这个值）。
 - 2 GiB 的机器上别在网关旁边再跑 `openclaw` CLI（`docker compose exec openclaw openclaw ...`）：CLI 会再起一整套运行时，机器会失联到要从控制台强制重启。看状态用 `docker compose logs`、`docker stats`、curl 就够了。
+- 改了 `.env` 或 compose 导致 openclaw 容器被重建后，如果日志反复出现 `OpenClaw agent database ... run "openclaw doctor --fix"`，是上次没优雅退出把 agent 的 sqlite 弄坏了。修法：`docker compose -f deploy/vps/docker-compose.yml stop openclaw && docker compose -f deploy/vps/docker-compose.yml run --rm --no-deps -T --entrypoint '' -u node -e HOME=/home/node openclaw openclaw doctor --fix && docker compose -f deploy/vps/docker-compose.yml up -d openclaw`。compose 里已加 `stop_grace_period: 90s` 减少复发。
+- 改了 `deploy/vps/Caddyfile` 要 `docker compose -f deploy/vps/docker-compose.yml restart caddy`，`up -d` 不会重载它。
 - 网关空载约 1 GiB，开会话再加 agent 运行时和 Notion MCP。容器封顶 3 GiB 且禁用 swap（`deploy/vps/docker-compose.yml`），超了会 OOM 重启而不是把机器冻住。
 - 持久卷权限：启动脚本已 `chown` 给 node 用户。如果日志里有 EACCES，删掉卷重建一次。
 - Notion MCP 用 `npx` 临时下载官方 server，首次启动慢一点是正常的。

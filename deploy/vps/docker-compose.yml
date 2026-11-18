@@ -7,6 +7,8 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    # 网关优雅退出要几十秒；Docker 默认只等 10 秒就 kill，会把 agent 的 sqlite 弄坏（启动报 "run openclaw doctor --fix"）。
+    stop_grace_period: 90s
     env_file: .env
     environment:
       PORT: "18789"
