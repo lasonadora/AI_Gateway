@@ -9,6 +9,14 @@ services:
     restart: unless-stopped
     # 网关优雅退出要几十秒；Docker 默认只等 10 秒就 kill，会把 agent 的 sqlite 弄坏（启动报 "run openclaw doctor --fix"）。
     stop_grace_period: 90s
+    # 官方镜像自带的 healthcheck 会把整套配置模块 import 一遍，这台机器上 10 秒内跑不完，老是误报 unhealthy。
+    # 换成轻量 HTTP 探活：网关的 HTTP 口能返回就算活着。
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 180s
     env_file: .env
     environment:
       PORT: "18789"
