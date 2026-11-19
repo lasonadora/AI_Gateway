@@ -119,7 +119,7 @@ iPhone 快捷指令（装一次，之后一键）：
 
 接收端自带定时器（`REPORT_TIME`，默认 21:30 本地时间），到点把当天「记录」里的饮食 / 排便拉下来：数字全在代码里算（`ingest/src/report.ts`：正餐去重、五大类覆盖、均衡度 = 覆盖数 × 20、Bristol、固定规则的异常列表），模型只负责写一句话总结 + 2–4 条观察 + 1 条明天的建议（`REPORT_MODEL`，默认同 `VISION_MODEL`）。结果写进「报告」库一行（type 日报，正文里每条记录都是可点的链接），同一天重跑会把旧的归档再建新的。
 
-日报后半段是**市场 + 新闻**（`ingest/src/brief.ts`）：`BRIEF_TICKERS`（默认 TSLA, SPCX, ASML, QQQ）的最新价、日涨跌、5 日 / 1 月涨跌由代码从 Yahoo Finance（备胎 Stooq）算出来，各标的的 Yahoo 新闻标题 + Google News / BBC 的世界新闻喂给模型，模型写 ≤`BRIEF_MAX_CHARS`（默认 500）字的市场小节（不给买卖建议）并按"对世界的影响"挑 3 条新闻；链接只允许来自抓到的列表。行情源挂了就只写数字，新闻源挂了就写"没取到"，都不影响健康部分。注意 21:30 北京时间美股尚未开盘，看到的是上一交易日收盘 + 盘前消息。
+日报后半段是**市场 + 新闻**（`ingest/src/brief.ts`）：`BRIEF_TICKERS`（默认 TSLA, SPCX, ASML, QQQ）的最新价、日涨跌、盘前/盘后由代码从 CNBC 行情接口取（Yahoo 对云主机限流、Stooq 403，只做备胎），5 日 / 1 月涨跌用自己每天攒的收盘历史（`/data/photos/quotes-history.json`，攒够 5 天 / 21 天才显示），各标的的 Google News 标题 + Google News / BBC 的世界新闻喂给模型，模型写 ≤`BRIEF_MAX_CHARS`（默认 500）字的市场小节（不给买卖建议）并按"对世界的影响"挑 3 条新闻；链接只允许来自抓到的列表。行情源挂了就只写数字，新闻源挂了就写"没取到"，都不影响健康部分。注意 21:30 北京时间美股尚未开盘，看到的是上一交易日收盘 + 盘前消息。
 
 推送到 iPhone 用 **Bark**（App Store 免费，国内直连，走 APNs）：装好 → 首页复制 device key → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `BARK_KEY` → 会重启服务。没配 Bark 就只写 Notion。配了以后：每拍一张照片服务器立刻推一条"已记录 · 早餐 …"（时效性通知，能穿过专注模式 / 屏幕使用时间的停用时间；快捷指令里自己的"显示通知"那步可以删掉），排便识别出带血 / 黑便会推警示，不等日报。
 

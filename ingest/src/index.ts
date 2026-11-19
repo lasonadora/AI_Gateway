@@ -15,7 +15,7 @@ import sharp from "sharp";
 import { aggregate, type Daily } from "./hae.ts";
 import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, iconFor, type Analysis } from "./photo.ts";
 import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserPrompt, parseNarrative, pushText, reportBlocks, reportProps, type DayStats, type Narrative } from "./report.ts";
-import { DEFAULT_TICKERS, parseYahooChart, parseStooqCsv, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief } from "./brief.ts";
+import { DEFAULT_TICKERS, NEWS_QUERY, parseYahooChart, parseCnbcQuotes, updateHistory, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief, type History } from "./brief.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -318,24 +318,36 @@ async function getText(url: string, timeoutMs = 12_000): Promise<string> {
   return await res.text();
 }
 
-async function fetchQuote(symbol: string): Promise<Quote | null> {
+const HISTORY_FILE = join(PHOTO_DIR, "quotes-history.json"); // 自己攒的收盘历史，算 5 日 / 1 月涨跌用
+
+async function loadHistory(): Promise<History> {
   try {
-    const json = JSON.parse(await getText(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1mo&interval=1d`));
-    const q = parseYahooChart(json);
-    if (q) return q;
-  } catch (e: any) {
-    console.error(`[brief] yahoo ${symbol}`, e?.message ?? e);
+    return JSON.parse(await readFile(HISTORY_FILE, "utf8"));
+  } catch {
+    return {};
   }
+}
+
+/** 行情：CNBC 一次拿全部标的（这台机器上 Yahoo 限流、Stooq 403）；CNBC 挂了再逐个试 Yahoo。 */
+async function fetchQuotes(symbols: string[], history: History): Promise<{ quotes: Quote[]; extended: Record<string, string> }> {
   try {
-    const d = new Date();
-    const d1 = new Date(d.getTime() - 45 * 86400_000);
-    const f = (x: Date) => x.toISOString().slice(0, 10).replace(/-/g, "");
-    const csv = await getText(`https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}.us&i=d&d1=${f(d1)}&d2=${f(d)}`);
-    return parseStooqCsv(symbol, csv);
+    const url = `https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=${symbols.join("|")}&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json`;
+    const r = parseCnbcQuotes(JSON.parse(await getText(url)), history);
+    if (r.quotes.length) return r;
+    throw new Error("CNBC 返回里没有可用行情");
   } catch (e: any) {
-    console.error(`[brief] stooq ${symbol}`, e?.message ?? e);
-    return null;
+    console.error("[brief] cnbc", e?.message ?? e);
   }
+  const quotes: Quote[] = [];
+  for (const s of symbols) {
+    try {
+      const q = parseYahooChart(JSON.parse(await getText(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}?range=1mo&interval=1d`)));
+      if (q) quotes.push(q);
+    } catch (e: any) {
+      console.error(`[brief] yahoo ${s}`, e?.message ?? e);
+    }
+  }
+  return { quotes, extended: {} };
 }
 
 async function fetchFeed(url: string, source: string): Promise<NewsItem[]> {
@@ -349,28 +361,34 @@ async function fetchFeed(url: string, source: string): Promise<NewsItem[]> {
 
 async function buildBrief(ymd: string): Promise<{ brief: Brief; quotes: Quote[] } | null> {
   if (!BRIEF_TICKERS.length) return null;
-  const quotes: Quote[] = [];
-  const failed: string[] = [];
-  const tickerNews: Record<string, NewsItem[]> = {};
-  await Promise.all(
-    BRIEF_TICKERS.map(async (s) => {
-      const [q, news] = await Promise.all([fetchQuote(s), fetchFeed(`https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(s)}&region=US&lang=en-US`, "Yahoo Finance")]);
-      if (q) quotes.push(q);
-      else failed.push(s);
-      tickerNews[s] = dedupeNews(news, 6);
-    }),
-  );
-  quotes.sort((a, b) => BRIEF_TICKERS.indexOf(a.symbol) - BRIEF_TICKERS.indexOf(b.symbol));
-  const [gn, bbc] = await Promise.all([
+  const history = await loadHistory();
+  const [{ quotes, extended }, tickerNewsList, gn, bbc] = await Promise.all([
+    fetchQuotes(BRIEF_TICKERS, history),
+    Promise.all(BRIEF_TICKERS.map((s) => fetchFeed(`https://news.google.com/rss/search?q=${encodeURIComponent(`${NEWS_QUERY[s] ?? s} stock when:2d`)}&hl=en-US&gl=US&ceid=US:en`, "Google News"))),
     fetchFeed("https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", "Google News"),
     fetchFeed("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC"),
   ]);
+  quotes.sort((a, b) => BRIEF_TICKERS.indexOf(a.symbol) - BRIEF_TICKERS.indexOf(b.symbol));
+  const failed = BRIEF_TICKERS.filter((s) => !quotes.some((q) => q.symbol === s));
+  const tickerNews: Record<string, NewsItem[]> = {};
+  BRIEF_TICKERS.forEach((s, i) => (tickerNews[s] = dedupeNews(tickerNewsList[i], 6)));
   const world = dedupeNews([...gn, ...bbc], 40);
-  const allowed = new Set(world.map((w) => w.link));
+
+  if (quotes.length) {
+    try {
+      await mkdir(PHOTO_DIR, { recursive: true });
+      await writeFile(HISTORY_FILE, JSON.stringify(updateHistory(history, quotes)));
+    } catch (e: any) {
+      console.error("[brief] 写历史失败", e?.message ?? e);
+    }
+  }
+
   const fb = fallbackMarket(quotes, failed);
   let brief: Brief;
   try {
-    brief = parseBrief(await askModel(BRIEF_SYSTEM_PROMPT.replace("{MAX}", String(Math.round(BRIEF_MAX_CHARS * 0.9))), briefUserPrompt(ymd, quotes, tickerNews, world, failed), 1500), allowed, BRIEF_MAX_CHARS, fb);
+    const raw = await askModel(BRIEF_SYSTEM_PROMPT.replace("{MAX}", String(Math.round(BRIEF_MAX_CHARS * 0.9))), briefUserPrompt(ymd, quotes, tickerNews, world, failed, extended), 2500);
+    brief = parseBrief(raw, world, BRIEF_MAX_CHARS, fb);
+    if (!brief.from_model) console.error("[brief] 模型输出不是合法 JSON：", raw.slice(0, 200));
   } catch (e: any) {
     console.error("[brief] 模型失败，用数字兜底", e?.message ?? e);
     brief = { market: fb, news: [], from_model: false };

@@ -101,6 +101,88 @@ export function parseStooqCsv(symbol: string, csv: string): Quote | null {
   return quoteFromCloses(symbol, closes, { epoch });
 }
 
+// ---------- CNBC（主力源；Yahoo 对这台机器限流 429，Stooq 403） ----------
+
+export interface HistPoint {
+  date: string; // 纽约日期 YYYY-MM-DD
+  close: number;
+}
+export type History = Record<string, HistPoint[]>;
+
+const num = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const cleaned = v.replace(/,/g, "").trim();
+  if (!/^[-+]?\d*\.?\d+$/.test(cleaned)) return null; // "N/A"、"UNCH"、空串都算没有
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+};
+
+export function nyDate(epochSec: number): string {
+  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+  return f.format(new Date(epochSec * 1000));
+}
+
+/** 用自己攒的收盘历史算 5 日 / 1 月涨跌（历史不够就 null）。history 按日期升序。 */
+export function changesFromHistory(last: number, lastDate: string, hist: HistPoint[] | undefined): { d5: number | null; m1: number | null } {
+  const past = (hist ?? []).filter((h) => h.date < lastDate).sort((a, b) => a.date.localeCompare(b.date));
+  const back = (n: number) => (past.length >= n ? past[past.length - n] : null);
+  const p5 = back(5);
+  const p21 = back(21);
+  return { d5: p5 ? pct(last, p5.close) : null, m1: p21 ? pct(last, p21.close) : null };
+}
+
+/** CNBC restQuote 接口（symbols 用 | 连接）。字段是带逗号的字符串。 */
+export function parseCnbcQuotes(json: any, history: History = {}): { quotes: Quote[]; extended: Record<string, string> } {
+  const list: any[] = json?.FormattedQuoteResult?.FormattedQuote ?? [];
+  const quotes: Quote[] = [];
+  const extended: Record<string, string> = {};
+  for (const q of list) {
+    const symbol = String(q.symbol ?? "").toUpperCase();
+    const last = num(q.last);
+    const prev = num(q.previous_day_closing);
+    if (!symbol || last === null || prev === null) continue;
+    const t = q.last_time ? Date.parse(q.last_time) : NaN;
+    const epoch = Number.isNaN(t) ? Math.floor(Date.now() / 1000) : Math.floor(t / 1000);
+    const lastDate = nyDate(epoch);
+    const { d5, m1 } = changesFromHistory(last, lastDate, history[symbol]);
+    quotes.push({
+      symbol,
+      name: q.name ?? q.shortName ?? null,
+      currency: "USD",
+      last: r2(last),
+      prev: r2(prev),
+      change_pct: num(q.change_pct) ?? pct(last, prev),
+      change_5d_pct: d5,
+      change_1m_pct: m1,
+      as_of: nyTime(epoch),
+      as_of_epoch: epoch,
+      high_52w: num(q.yrhiprice),
+      low_52w: num(q.yrloprice),
+    });
+    const ext = q.ExtendedMktQuote;
+    const extLast = num(ext?.last);
+    const extPct = num(ext?.change_pct);
+    if (ext && extLast !== null && extPct !== null && ext.type) extended[symbol] = `${ext.type === "PRE_MKT" ? "盘前" : "盘后"} ${extLast} ${fmtPct(extPct)}`;
+  }
+  return { quotes, extended };
+}
+
+/** 把这次的收盘记进历史（同一天只记一次），每个标的最多留 70 个点。 */
+export function updateHistory(history: History, quotes: Quote[]): History {
+  const out: History = { ...history };
+  for (const q of quotes) {
+    const date = nyDate(q.as_of_epoch);
+    const arr = [...(out[q.symbol] ?? [])].filter((h) => h.date !== date);
+    arr.push({ date, close: q.last });
+    arr.sort((a, b) => a.date.localeCompare(b.date));
+    out[q.symbol] = arr.slice(-70);
+  }
+  return out;
+}
+
+export const NEWS_QUERY: Record<string, string> = { TSLA: "Tesla", SPCX: "SpaceX", ASML: "ASML", QQQ: "Nasdaq 100 QQQ" };
+
 // ---------- RSS ----------
 
 const ENT: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
@@ -159,11 +241,11 @@ export function dedupeNews(items: NewsItem[], n: number): NewsItem[] {
 export const BRIEF_SYSTEM_PROMPT = `你在给一位个人投资者写每日简报的两个小节，中文，口语但干净。
 【市场】只能基于给你的行情数字和新闻标题写，不要编造数字、不要预测价格、不要给买卖建议（不说"建议买入/卖出/加仓/减仓"）。
 格式：每个标的一行（标的 · 涨跌 · 一句话原因，原因只能来自提供的新闻或"没有明显消息"），最后 1–2 句整体观察（比如和 QQQ 的相对表现、共同驱动因素、接下来要盯的日期）。全部加起来不超过 {MAX} 个汉字。如果数据注明不是今天的收盘（周末/假期），开头先说明一句。
-【新闻】从给你的世界新闻标题里挑最值得关注的 3 条，按"对世界的影响"从大到小排（地缘冲突、重大经济/政策变化、影响大量人口的事件 > 单个公司/名人 > 体育娱乐）。同一事件只算一条。每条给中文标题和一句"为什么重要"（≤40 字）。url 必须原样来自提供的列表。
+【新闻】从给你的世界新闻列表里挑最值得关注的 3 条，按"对世界的影响"从大到小排（地缘冲突、重大经济/政策变化、影响大量人口的事件 > 单个公司/名人 > 体育娱乐）。同一事件只算一条。每条给中文标题和一句"为什么重要"（≤40 字），并带上列表里的编号 id。
 只输出一个 JSON 对象，不要 markdown 代码块、不要别的文字：
-{"market": "……", "news": [{"title": "中文标题", "source": "来源", "url": "原链接", "why": "为什么重要"}, …3 条]}`;
+{"market": "……", "news": [{"id": 编号, "title": "中文标题", "why": "为什么重要"}, …3 条]}`;
 
-export function briefUserPrompt(date: string, quotes: Quote[], tickerNews: Record<string, NewsItem[]>, worldNews: NewsItem[], failed: string[]): string {
+export function briefUserPrompt(date: string, quotes: Quote[], tickerNews: Record<string, NewsItem[]>, worldNews: NewsItem[], failed: string[], extended: Record<string, string> = {}): string {
   const q = quotes.map((x) => ({
     symbol: x.symbol,
     name: x.name,
@@ -172,18 +254,19 @@ export function briefUserPrompt(date: string, quotes: Quote[], tickerNews: Recor
     change_5d_pct: x.change_5d_pct,
     change_1m_pct: x.change_1m_pct,
     as_of: x.as_of,
+    extended_hours: extended[x.symbol] ?? null,
     high_52w: x.high_52w,
     low_52w: x.low_52w,
   }));
   const tn: Record<string, string[]> = {};
   for (const [s, items] of Object.entries(tickerNews)) tn[s] = items.map((i) => `${i.title} (${i.source}${i.published ? ", " + i.published.slice(0, 16) + "Z" : ""})`);
-  const wn = worldNews.map((i, k) => `${k + 1}. ${i.title} | ${i.source} | ${i.published ? i.published.slice(0, 16) + "Z" : "?"} | ${i.link}`);
+  const wn = worldNews.map((i, k) => `[${k + 1}] ${i.title} | ${i.source} | ${i.published ? i.published.slice(0, 16) + "Z" : "?"}`);
   return [
     `日期：${date}（北京时间）。`,
     failed.length ? `这些标的行情没取到，直接写"行情暂缺"：${failed.join(", ")}` : "",
     `行情（代码算好的，as_of 是纽约时间）：\n${JSON.stringify(q)}`,
     `各标的最近新闻标题：\n${JSON.stringify(tn)}`,
-    `世界新闻（标题 | 来源 | 时间 | 链接）：\n${wn.join("\n")}`,
+    `世界新闻（[编号] 标题 | 来源 | 时间）：\n${wn.join("\n")}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -199,22 +282,26 @@ export function clampChinese(s: string, max: number): string {
   return (idx > max * 0.5 ? cut.slice(0, idx + 1) : cut).trim();
 }
 
-export function parseBrief(raw: string, allowedUrls: Set<string>, maxChars: number, fallbackMarket: string): Brief {
+export function parseBrief(raw: string, worldNews: NewsItem[], maxChars: number, fallbackMarket: string): Brief {
   try {
     const text = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
     const o = JSON.parse(text);
     const market = typeof o.market === "string" && o.market.trim() ? clampChinese(o.market, maxChars) : fallbackMarket;
-    const news = Array.isArray(o.news)
-      ? o.news
-          .filter((n: any) => n && typeof n.title === "string" && n.title.trim())
-          .slice(0, 3)
-          .map((n: any) => ({
-            title: String(n.title).trim().slice(0, 120),
-            source: typeof n.source === "string" ? n.source.trim().slice(0, 40) : "",
-            url: typeof n.url === "string" && allowedUrls.has(n.url.trim()) ? n.url.trim() : null,
-            why: typeof n.why === "string" ? n.why.trim().slice(0, 120) : "",
-          }))
-      : [];
+    const used = new Set<number>();
+    const news: Brief["news"] = [];
+    for (const n of Array.isArray(o.news) ? o.news : []) {
+      if (!n || typeof n.title !== "string" || !n.title.trim()) continue;
+      const id = Number(n.id);
+      const item = Number.isInteger(id) && id >= 1 && id <= worldNews.length && !used.has(id) ? worldNews[id - 1] : null;
+      if (item) used.add(id);
+      news.push({
+        title: n.title.trim().slice(0, 120),
+        source: item?.source ?? (typeof n.source === "string" ? n.source.trim().slice(0, 40) : ""),
+        url: item?.link ?? null,
+        why: typeof n.why === "string" ? n.why.trim().slice(0, 120) : "",
+      });
+      if (news.length >= 3) break;
+    }
     return { market, news, from_model: true };
   } catch {
     return { market: fallbackMarket, news: [], from_model: false };
@@ -257,7 +344,7 @@ export function briefBlocks(brief: Brief, quotes: Quote[], tickers: string[]): a
   } else {
     out.push(block("paragraph", [txt("今天新闻源没取到。")]));
   }
-  out.push(block("callout", [txt("行情和新闻来自公开源（Yahoo Finance / Google News / BBC），数字由程序计算，文字由模型生成；只是信息整理，不构成投资建议。")], { icon: { type: "emoji", emoji: "📈" }, color: "gray_background" }));
+  out.push(block("callout", [txt("行情和新闻来自公开源（CNBC / Google News / BBC），数字由程序计算，文字由模型生成；只是信息整理，不构成投资建议。")], { icon: { type: "emoji", emoji: "📈" }, color: "gray_background" }));
   return out;
 }
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { quoteFromCloses, parseYahooChart, parseStooqCsv, parseRss, dedupeNews, parseBrief, clampChinese, fallbackMarket, briefBlocks, briefProps, briefUserPrompt, type Quote } from "./brief.ts";
+import { quoteFromCloses, parseYahooChart, parseStooqCsv, parseCnbcQuotes, updateHistory, changesFromHistory, parseRss, dedupeNews, parseBrief, clampChinese, fallbackMarket, briefBlocks, briefProps, briefUserPrompt, type Quote, type NewsItem } from "./brief.ts";
 
 test("quoteFromCloses：涨跌、5 日、1 月", () => {
   const closes = Array.from({ length: 25 }, (_, i) => 100 + i); // 100..124
@@ -63,22 +63,66 @@ test("parseRss：Google News 风格（source 标签、HTML 实体、CDATA）", (
   assert.equal(top[0].link, "https://example.com/b", "新的在前");
 });
 
-test("clampChinese / parseBrief：字数上限、URL 白名单、坏输出兜底", () => {
+test("clampChinese / parseBrief：字数上限、编号映射到链接、坏输出兜底", () => {
   const long = "一".repeat(300) + "。" + "二".repeat(300) + "。";
   const c = clampChinese(long, 500);
   assert.ok([...c].length <= 500);
   assert.ok(c.endsWith("。"));
 
-  const allowed = new Set(["https://ok/1"]);
-  const good = parseBrief('{"market":"TSLA 涨了。","news":[{"title":"A","source":"BBC","url":"https://ok/1","why":"大"},{"title":"B","url":"https://evil/x","why":"小"}]}', allowed, 500, "fb");
+  const world: NewsItem[] = [
+    { title: "A", link: "https://ok/1", source: "BBC", published: null, description: "" },
+    { title: "B", link: "https://ok/2", source: "Reuters", published: null, description: "" },
+  ];
+  const good = parseBrief('{"market":"TSLA 涨了。","news":[{"id":2,"title":"乙","why":"大"},{"id":2,"title":"重复","why":"x"},{"id":9,"title":"编号不存在","why":"小"}]}', world, 500, "fb");
   assert.equal(good.from_model, true);
-  assert.equal(good.news[0].url, "https://ok/1");
-  assert.equal(good.news[1].url, null, "不在列表里的链接丢掉");
+  assert.equal(good.news[0].url, "https://ok/2");
+  assert.equal(good.news[0].source, "Reuters");
+  assert.equal(good.news[1].url, null, "重复编号不再给链接");
+  assert.equal(good.news[2].url, null, "编号越界丢掉链接");
 
-  const bad = parseBrief("今天市场不错", allowed, 500, "TSLA 1 +1.0%。");
+  const bad = parseBrief("今天市场不错", world, 500, "TSLA 1 +1.0%。");
   assert.equal(bad.from_model, false);
   assert.equal(bad.market, "TSLA 1 +1.0%。");
   assert.deepEqual(bad.news, []);
+});
+
+test("parseCnbcQuotes + 本地历史：带逗号的字符串、盘前、5 日/1 月", () => {
+  const json = {
+    FormattedQuoteResult: {
+      FormattedQuote: [
+        {
+          symbol: "SPCX",
+          name: "Space Exploration Technologies Corp",
+          last: "1,234.56",
+          previous_day_closing: "1,200.00",
+          change_pct: "2.88",
+          last_time: "2026-11-18T16:00:00.000-0500",
+          yrhiprice: "1,300.00",
+          yrloprice: "150.00",
+          ExtendedMktQuote: { type: "PRE_MKT", last: "1,240.10", change_pct: "0.45" },
+        },
+        { symbol: "BAD", last: "N/A", previous_day_closing: "1" },
+      ],
+    },
+  };
+  const hist = { SPCX: Array.from({ length: 30 }, (_, i) => ({ date: `2026-10-${String(i + 1).padStart(2, "0")}`, close: 1000 + i * 10 })) };
+  const { quotes, extended } = parseCnbcQuotes(json, hist);
+  assert.equal(quotes.length, 1);
+  const q = quotes[0];
+  assert.equal(q.last, 1234.56);
+  assert.equal(q.prev, 1200);
+  assert.equal(q.change_pct, 2.88);
+  assert.equal(q.as_of, "11-18 16:00 ET");
+  assert.equal(q.high_52w, 1300);
+  assert.equal(q.change_5d_pct, -1.2); // vs 2026-10-26 close 1250
+  assert.equal(q.change_1m_pct, 13.3); // vs 2026-10-10 close 1090
+  assert.equal(extended.SPCX, "盘前 1240.1 +0.5%");
+
+  const h2 = updateHistory(hist, quotes);
+  assert.equal(h2.SPCX[h2.SPCX.length - 1].date, "2026-11-18");
+  assert.equal(h2.SPCX[h2.SPCX.length - 1].close, 1234.56);
+  assert.equal(updateHistory(h2, quotes).SPCX.length, h2.SPCX.length, "同一天不重复记");
+  assert.deepEqual(changesFromHistory(10, "2026-11-18", undefined), { d5: null, m1: null });
 });
 
 test("fallbackMarket / blocks / props / prompt 形状", () => {
@@ -94,6 +138,6 @@ test("fallbackMarket / blocks / props / prompt 形状", () => {
   assert.equal(link.text.link.url, "https://x");
   const props = briefProps(brief);
   assert.equal(props.news.rich_text[0].text.content, "1. 【BBC】标题 — 原因");
-  const prompt = briefUserPrompt("2026-11-19", [q], { TSLA: [] }, [{ title: "t", link: "https://x", source: "BBC", published: null, description: "" }], ["SPCX"]);
-  assert.ok(prompt.includes("行情暂缺") && prompt.includes("https://x"));
+  const prompt = briefUserPrompt("2026-11-19", [q], { TSLA: [] }, [{ title: "t", link: "https://x", source: "BBC", published: null, description: "" }], ["SPCX"], { TSLA: "盘前 413 +0.2%" });
+  assert.ok(prompt.includes("行情暂缺") && prompt.includes("[1] t | BBC") && prompt.includes("盘前 413") && !prompt.includes("https://x"), "链接不进提示词，用编号");
 });
