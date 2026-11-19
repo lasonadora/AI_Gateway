@@ -284,9 +284,7 @@ app.post("/ingest/photo", async (c) => {
   console.log(`[photo] ${t.iso} ${analysis.kind} "${analysis.title}" conf=${analysis.confidence} notion=${notionUrl ?? notionError ?? "skip"}`);
 
   // 带血 / 黑便：不等日报，立刻推一条（配了 Bark 才会推）
-  if (analysis.red_flag) void pushPhone("⚠️ 排便记录有异常标记", `${analysis.flags.join("、")}。建议尽快就医，这不是诊断。`, notionUrl, "timeSensitive");
-
-  // 6) 给手机的一句话（快捷指令弹通知用）
+  // 6) 给手机的一句话
   const headline =
     analysis.kind === "other"
       ? "没认出是饭还是排便，照片已留档"
@@ -294,6 +292,16 @@ app.post("/ingest/photo", async (c) => {
         ? `排便 · Bristol ${analysis.bristol ?? "?"}${analysis.flags.length ? ` · ${analysis.flags.join("/")}` : ""}`
         : `${meal ?? ""} ${analysis.title}${analysis.calorie_band ? ` · ${analysis.calorie_band}` : ""}`.trim();
   const message = [headline, analysis.notes, notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
+
+  // 7) 服务器直接推一条到手机（配了 Bark 才推）。快捷指令自己的"显示通知"在专注模式 / 停用时间下会被吞掉，
+  //    这条走 APNs 的时效性通知能穿过去。带血 / 黑便时标题换成警示，不再另发一条。
+  void pushPhone(
+    analysis.red_flag ? "⚠️ 排便记录有异常标记" : `已记录 · ${analysis.kind === "stool" ? "排便" : analysis.kind === "other" ? "照片" : (meal ?? "饮食")}`,
+    analysis.red_flag ? `${headline}\n建议尽快就医，这不是诊断。` : message,
+    notionUrl,
+    "timeSensitive",
+  );
+
   return c.json({ ok: !notionError, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl });
 });
 
