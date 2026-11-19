@@ -15,6 +15,7 @@ import sharp from "sharp";
 import { aggregate, type Daily } from "./hae.ts";
 import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, iconFor, type Analysis } from "./photo.ts";
 import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserPrompt, parseNarrative, pushText, reportBlocks, reportProps, type DayStats, type Narrative } from "./report.ts";
+import { DEFAULT_TICKERS, parseYahooChart, parseStooqCsv, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief } from "./brief.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -36,6 +37,9 @@ const REPORT_TIME = /^\d{2}:\d{2}$/.test(process.env.REPORT_TIME ?? "") ? (proce
 const BARK_KEY = process.env.BARK_KEY || ""; // iPhone 推送（Bark app 的 device key）；空 = 不推
 const BARK_SERVER = (process.env.BARK_SERVER || "https://api.day.app").replace(/\/$/, "");
 const STATE_FILE = join(PHOTO_DIR, "report-state.json");
+// 日报里的市场 + 新闻小节：BRIEF_TICKERS 设成空字符串即关闭
+const BRIEF_TICKERS = (process.env.BRIEF_TICKERS ?? DEFAULT_TICKERS.join(",")).split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+const BRIEF_MAX_CHARS = Number(process.env.BRIEF_MAX_CHARS) > 0 ? Number(process.env.BRIEF_MAX_CHARS) : 500;
 
 const notion = new Client({ auth: NOTION_TOKEN, notionVersion: "2025-09-03" });
 const app = new Hono();
@@ -305,6 +309,76 @@ app.post("/ingest/photo", async (c) => {
   return c.json({ ok: !notionError, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl });
 });
 
+// ---------- 市场 + 新闻（公开源，取不到就降级，不影响健康部分） ----------
+
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+async function getText(url: string, timeoutMs = 12_000): Promise<string> {
+  const res = await fetch(url, { headers: { "user-agent": UA, accept: "*/*" }, signal: AbortSignal.timeout(timeoutMs), redirect: "follow" });
+  if (!res.ok) throw new Error(`${res.status} ${url}`);
+  return await res.text();
+}
+
+async function fetchQuote(symbol: string): Promise<Quote | null> {
+  try {
+    const json = JSON.parse(await getText(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1mo&interval=1d`));
+    const q = parseYahooChart(json);
+    if (q) return q;
+  } catch (e: any) {
+    console.error(`[brief] yahoo ${symbol}`, e?.message ?? e);
+  }
+  try {
+    const d = new Date();
+    const d1 = new Date(d.getTime() - 45 * 86400_000);
+    const f = (x: Date) => x.toISOString().slice(0, 10).replace(/-/g, "");
+    const csv = await getText(`https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}.us&i=d&d1=${f(d1)}&d2=${f(d)}`);
+    return parseStooqCsv(symbol, csv);
+  } catch (e: any) {
+    console.error(`[brief] stooq ${symbol}`, e?.message ?? e);
+    return null;
+  }
+}
+
+async function fetchFeed(url: string, source: string): Promise<NewsItem[]> {
+  try {
+    return parseRss(await getText(url), source);
+  } catch (e: any) {
+    console.error(`[brief] rss ${source}`, e?.message ?? e);
+    return [];
+  }
+}
+
+async function buildBrief(ymd: string): Promise<{ brief: Brief; quotes: Quote[] } | null> {
+  if (!BRIEF_TICKERS.length) return null;
+  const quotes: Quote[] = [];
+  const failed: string[] = [];
+  const tickerNews: Record<string, NewsItem[]> = {};
+  await Promise.all(
+    BRIEF_TICKERS.map(async (s) => {
+      const [q, news] = await Promise.all([fetchQuote(s), fetchFeed(`https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(s)}&region=US&lang=en-US`, "Yahoo Finance")]);
+      if (q) quotes.push(q);
+      else failed.push(s);
+      tickerNews[s] = dedupeNews(news, 6);
+    }),
+  );
+  quotes.sort((a, b) => BRIEF_TICKERS.indexOf(a.symbol) - BRIEF_TICKERS.indexOf(b.symbol));
+  const [gn, bbc] = await Promise.all([
+    fetchFeed("https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en", "Google News"),
+    fetchFeed("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC"),
+  ]);
+  const world = dedupeNews([...gn, ...bbc], 40);
+  const allowed = new Set(world.map((w) => w.link));
+  const fb = fallbackMarket(quotes, failed);
+  let brief: Brief;
+  try {
+    brief = parseBrief(await askModel(BRIEF_SYSTEM_PROMPT.replace("{MAX}", String(Math.round(BRIEF_MAX_CHARS * 0.9))), briefUserPrompt(ymd, quotes, tickerNews, world, failed), 1500), allowed, BRIEF_MAX_CHARS, fb);
+  } catch (e: any) {
+    console.error("[brief] 模型失败，用数字兜底", e?.message ?? e);
+    brief = { market: fb, news: [], from_model: false };
+  }
+  console.log(`[brief] ${ymd} quotes=${quotes.length}/${BRIEF_TICKERS.length} world=${world.length} news=${brief.news.length} model=${brief.from_model}`);
+  return { brief, quotes };
+}
+
 // ---------- 日报 ----------
 
 interface ReportState {
@@ -356,30 +430,35 @@ async function runDailyReport(ymd: string, opts: { push: boolean; cutoff?: strin
   if (!REPORT_DS) throw new Error("没配 NOTION_REPORT_DATA_SOURCE_ID");
   const now = localTime(new Date(), TZ);
   const cutoff = opts.cutoff ?? (now.ymd === ymd ? now.iso.slice(11, 16) : "23:59");
-  const entries = await fetchDayEntries(ymd);
+  // 健康部分和市场部分并行取；市场部分失败不影响健康部分
+  const [entries, market] = await Promise.all([
+    fetchDayEntries(ymd),
+    buildBrief(ymd).catch((e: any) => {
+      console.error("[brief] 整体失败", e?.message ?? e);
+      return null;
+    }),
+  ]);
   const stats: DayStats = summarize(entries, ymd, cutoff);
 
-  if (!entries.length) {
-    // 一条记录都没有：不建空页，只提醒一句
-    const pushed = opts.push ? await pushPhone(`日报 ${ymd.slice(5).replace("-", "/")}`, "今天一条记录都没有。吃饭、排便记得拍一下。") : false;
-    console.log(`[report] ${ymd} 无记录 pushed=${pushed}`);
-    return { ok: true, date: ymd, empty: true, pushed };
-  }
-
   let narrative: Narrative;
-  try {
-    narrative = parseNarrative(await askModel(REPORT_SYSTEM_PROMPT, reportUserPrompt(stats)), stats);
-  } catch (e: any) {
-    console.error("[report] 模型失败，用规则兜底", e?.message ?? e);
-    narrative = parseNarrative("", stats);
+  if (!entries.length) {
+    narrative = { summary: "今天一条饮食 / 排便记录都没有。", observations: ["吃饭、排便记得拍一下，数据全了分析才准。"], suggestion: "明天第一顿就拍。", from_model: false };
+  } else {
+    try {
+      narrative = parseNarrative(await askModel(REPORT_SYSTEM_PROMPT, reportUserPrompt(stats)), stats);
+    } catch (e: any) {
+      console.error("[report] 模型失败，用规则兜底", e?.message ?? e);
+      narrative = parseNarrative("", stats);
+    }
   }
 
   await archiveOldReports(ymd);
+  const children = [...reportBlocks(stats, narrative, REPORT_MODEL), ...(market ? briefBlocks(market.brief, market.quotes, BRIEF_TICKERS) : [])];
   const page: any = await notion.pages.create({
     parent: { type: "data_source_id", data_source_id: REPORT_DS },
     icon: { type: "emoji", emoji: stats.red_flag ? "⚠️" : "📋" },
-    properties: reportProps(stats, narrative, REPORT_MODEL),
-    children: reportBlocks(stats, narrative, REPORT_MODEL),
+    properties: { ...reportProps(stats, narrative, REPORT_MODEL), ...(market ? briefProps(market.brief) : {}) },
+    children: children.slice(0, 100), // Notion 单次创建最多 100 个块
   } as any);
   const notionUrl: string | null = page.url ?? null;
 

@@ -49,6 +49,8 @@ services:
       NOTION_REPORT_DATA_SOURCE_ID: "94401eb4-de13-4cb8-9cc4-c840fc66fdb8"
       VISION_MODEL: "claude-sonnet-5-5"
       REPORT_TIME: "${REPORT_TIME:-21:30}"   # 每天几点出日报（本地时间）；BARK_KEY 在 .env 里（可选，手机推送）
+      BRIEF_TICKERS: "${BRIEF_TICKERS:-TSLA,SPCX,ASML,QQQ}"   # 日报里的市场小节；设成空字符串关闭
+      BRIEF_MAX_CHARS: "${BRIEF_MAX_CHARS:-500}"
       PHOTO_DIR: /data/photos
       TZ: "${OPENCLAW_TZ:-Asia/Shanghai}"
     volumes:
