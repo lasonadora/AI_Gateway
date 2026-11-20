@@ -135,7 +135,9 @@ iPhone 快捷指令（装一次，之后一键）：
 
 每条饮食记录会带**热量和三大营养素的估算**（模型像营养师看餐盘那样估本人这一顿：`kcal / protein_g / fat_g / carb_g`，存进「记录」的四个数字列；热量档位 轻/中/重 由 kcal 推出），回复里附三行：这顿多少、今天累计 / 目标、蛋白 脂肪 碳水还差多少。目标默认 2000 千卡 / 蛋白 120g / 脂肪 65g / 碳水 250g，Telegram 里 `/target 2000 120 65 250` 改，`/today` 看今天累计。日报的「统计」和报告库的 `kcal/protein_g/fat_g/carb_g` 也带当天合计，超目标 15% 以上列入异常。`POST /ingest/text {"text":"一杯豆浆"}`（Bearer）是文字记录的 HTTP 入口，给快捷指令用。
 
-安卓没有"快捷指令"，一键入口就是 Telegram：长按 bot 对话 → Add to Home Screen；打开后点 📎 → 相机 → 拍 → 发，三四下；或者相机拍完 Share → Telegram → 这个 bot。想要真正一键（桌面图标 → 相机 → 自动上传），装 **HTTP Shortcuts**（开源，F-Droid / GitHub 有 APK）建一个 POST `https://<域名>/ingest/photo` 的快捷方式：Header `Authorization: Bearer <INGEST_TOKEN>`，文件参数 `photo` 选"拍照"，响应显示 JSON 里的 `message`。
+**语音**也行：Telegram 里按住话筒说一句，服务器先把语音转成文字，再和打字一样处理（是记录就记，不是就给 agent），回复开头带上"🎤 听到的原话"方便核对。转文字走 OpenAI 兼容的 `/audio/transcriptions` 接口，默认 **Groq 的 Whisper large-v3-turbo**（中文准、一两秒出结果、$0.04 / 小时音频，有免费档）：去 console.groq.com 用 Google 账号登录 → API Keys → Create → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `STT_API_KEY`（会重启服务）。没配 key 的话收到语音会直说"还听不懂语音"。想换别家（OpenAI 的 `gpt-4o-mini-transcribe` 等）改 `.env` 里的 `STT_BASE_URL` / `STT_MODEL` 即可；`STT_LANGUAGE=zh` 可强制中文（默认自动判断，中英混说更稳）；最长 300 秒。Claude 的 API 目前不收音频，所以这一步必须另找一家。
+
+安卓没有"快捷指令"，一键入口就是 Telegram：打开 bot 对话 → 点顶部 bot 名字进资料页 → 右上角 ⋮ → Add to Home Screen；打开后点 📎 → 相机 → 拍 → 发，三四下；或者相机拍完 Share → Telegram → 这个 bot。想要真正一键（桌面图标 → 相机 → 自动上传），装 **HTTP Shortcuts**（开源，F-Droid / GitHub 有 APK）建一个 POST `https://<域名>/ingest/photo` 的快捷方式：Header `Authorization: Bearer <INGEST_TOKEN>`，文件参数 `photo` 选"拍照"，响应显示 JSON 里的 `message`。
 
 推送到 iPhone 也可以用 **Bark**（App Store 免费，国内直连，走 APNs）：装好 → 首页复制 device key → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `BARK_KEY` → 会重启服务。没配 Bark 就只写 Notion。配了以后：每拍一张照片服务器立刻推一条"已记录 · 早餐 …"（时效性通知，能穿过专注模式 / 屏幕使用时间的停用时间；快捷指令里自己的"显示通知"那步可以删掉），排便识别出带血 / 黑便会推警示，不等日报。
 

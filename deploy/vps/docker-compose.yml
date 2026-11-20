@@ -50,6 +50,8 @@ services:
       VISION_MODEL: "claude-sonnet-5-5"     # 看图留 Sonnet（一天 3 张，几分钱）
       REPORT_MODEL: "${REPORT_MODEL:-claude-sonnet-5-5}"   # 日报文字 + 市场/新闻；想省就在 .env 里设 REPORT_MODEL=claude-haiku-5-5
       REPORT_TIME: "${REPORT_TIME:-21:30}"   # 每天几点出日报（本地时间）；BARK_KEY 在 .env 里（可选，手机推送）
+      STT_BASE_URL: "${STT_BASE_URL:-https://api.groq.com/openai/v1}"   # Telegram 语音转文字（OpenAI 兼容接口）；key 是 .env 里的 STT_API_KEY，没配就不支持语音
+      STT_MODEL: "${STT_MODEL:-whisper-large-v3-turbo}"
       BRIEF_TICKERS: "${BRIEF_TICKERS:-TSLA,SPCX,ASML,QQQ}"   # 日报里的市场小节；设成空字符串关闭
       BRIEF_MAX_CHARS: "${BRIEF_MAX_CHARS:-500}"
       PHOTO_DIR: /data/photos

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在终端里交互式填入两把密钥（输入不回显、不进命令日志），然后启动/重启服务。
+# 在终端里交互式填入密钥（输入不回显、不进命令日志），然后启动/重启服务。再跑一遍只会问还没填的那些。
 # 用法：bash /opt/ai_gateway/deploy/vps/secrets.sh
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,6 +36,7 @@ optional_secret() { # 变量名 提示语
 }
 optional_secret TELEGRAM_BOT_TOKEN "TELEGRAM_BOT_TOKEN：BotFather 给的 bot token，照片 / 文字记录 + 日报推送走 Telegram"
 optional_secret BARK_KEY "BARK_KEY：iPhone 上 Bark app 的 device key，另一种推送方式"
+optional_secret STT_API_KEY "STT_API_KEY：Groq 的 API key（console.groq.com/keys 创建），Telegram 里发语音要靠它转文字"
 
 docker compose up -d --build
 sleep 8

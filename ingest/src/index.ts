@@ -18,6 +18,7 @@ import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserP
 import { DEFAULT_TICKERS, NEWS_QUERY, parseYahooChart, parseCnbcQuotes, updateHistory, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief, type History } from "./brief.ts";
 import { parseCommand, reportMessages, recordReply, esc, HELP_TEXT, PAIR_HINT } from "./telegram.ts";
 import { DEFAULT_TARGETS, sumMacros, nutritionLines, parseTargets, targetsLine, type Targets } from "./nutrition.ts";
+import { sttConfigFromEnv, transcribe, SttError, MAX_VOICE_SECONDS } from "./stt.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -46,6 +47,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ""; // 健康记录
 const TG_STATE_FILE = join(PHOTO_DIR, "telegram-state.json");
 const GATEWAY_URL = (process.env.OPENCLAW_URL || "http://openclaw:18789").replace(/\/$/, ""); // 同一个 compose 网络里的网关
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ""; // 和 .env 里网关的 token 一样；空 = 不转发给 agent
+const STT = sttConfigFromEnv(process.env); // Telegram 语音条转文字（STT_API_KEY，默认 Groq Whisper）；null = 不支持语音
 
 const notion = new Client({ auth: NOTION_TOKEN, notionVersion: "2025-09-03" });
 const app = new Hono();
@@ -900,35 +902,68 @@ async function tgHandle(msg: any) {
     }
     return;
   }
-  if (typeof msg.text === "string" && msg.text.trim()) {
-    const text = msg.text.trim();
+  // 语音条（msg.voice）或音频文件（msg.audio）→ 先转文字，再和打字一样处理；回复里带上听到的原话，方便核对
+  const voice = msg.voice ?? msg.audio ?? null;
+  if (voice?.file_id) {
+    if (!STT) {
+      await tgSend(chatId, "还听不懂语音：服务器上没配 STT_API_KEY（Groq 的 key）。配好之前先打字吧。");
+      return;
+    }
+    const seconds = Number(voice.duration ?? 0);
+    if (seconds > MAX_VOICE_SECONDS) {
+      await tgSend(chatId, `这条语音 ${seconds} 秒太长了，最多 ${MAX_VOICE_SECONDS} 秒。`);
+      return;
+    }
     const stop = typingKeepalive(chatId);
     try {
-      const r = await processText(text, "Telegram");
-      if (r.kind !== "other") {
-        await tgSend(chatId, recordReply(r));
+      const { buf, ext } = await tgDownload(voice.file_id);
+      const t0 = Date.now();
+      const transcript = await transcribe(buf, ext, STT);
+      console.log(`[tg] voice ${chatId} ${seconds}s stt=${Math.round((Date.now() - t0) / 1000)}s -> "${transcript.slice(0, 60)}"`);
+      if (!transcript) {
+        await tgSend(chatId, "没听清，再说一遍？（离嘴近一点、环境安静点）");
         return;
       }
-      if (!r.ok) {
-        await tgSend(chatId, recordReply(r)); // 模型挂了之类，直接说
-        return;
-      }
-      // 不是记录 → 交给 agent 聊 / 干活
-      try {
-        const t0 = Date.now();
-        const answer = await askAgent(chatId, text);
-        console.log(`[tg] agent ${chatId} ${Math.round((Date.now() - t0) / 1000)}s "${text.slice(0, 40)}" -> ${answer.length} chars`);
-        await tgSendPlain(chatId, answer);
-      } catch (e: any) {
-        console.error("[tg] agent 失败", e?.message ?? e);
-        await tgSend(chatId, `agent 没回：${esc(String(e?.message ?? e).slice(0, 160))}`);
-      }
+      await handleUtterance(chatId, transcript, `🎤 ${transcript}`);
+    } catch (e: any) {
+      console.error("[tg] 语音失败", e?.message ?? e);
+      const why = e instanceof SttError ? e.human() : String(e?.message ?? e).slice(0, 160);
+      await tgSend(chatId, `语音没处理成：${esc(why)}`);
     } finally {
       stop();
     }
     return;
   }
-  await tgSend(chatId, "发照片、文字，或者直接问我问题。");
+  if (typeof msg.text === "string" && msg.text.trim()) {
+    const stop = typingKeepalive(chatId);
+    try {
+      await handleUtterance(chatId, msg.text.trim());
+    } finally {
+      stop();
+    }
+    return;
+  }
+  await tgSend(chatId, "发照片、文字、语音，或者直接问我问题。");
+}
+
+/** 一句话（打字或语音转的）：是吃喝 / 排便记录就记，不是就交给 agent。header 是回复开头的一行（语音时放听到的原话）。 */
+async function handleUtterance(chatId: number, text: string, header?: string) {
+  const htmlHead = header ? `<i>${esc(header)}</i>\n` : "";
+  const r = await processText(text, "Telegram");
+  if (r.kind !== "other" || !r.ok) {
+    await tgSend(chatId, htmlHead + recordReply(r)); // 记上了 / 模型挂了之类，直接说
+    return;
+  }
+  // 不是记录 → 交给 agent 聊 / 干活
+  try {
+    const t0 = Date.now();
+    const answer = await askAgent(chatId, text);
+    console.log(`[tg] agent ${chatId} ${Math.round((Date.now() - t0) / 1000)}s "${text.slice(0, 40)}" -> ${answer.length} chars`);
+    await tgSendPlain(chatId, header ? `${header}\n\n${answer}` : answer);
+  } catch (e: any) {
+    console.error("[tg] agent 失败", e?.message ?? e);
+    await tgSend(chatId, `${htmlHead}agent 没回：${esc(String(e?.message ?? e).slice(0, 160))}`);
+  }
 }
 
 async function tgPollLoop() {
@@ -954,7 +989,7 @@ async function tgPollLoop() {
 }
 if (TELEGRAM_BOT_TOKEN) void tgPollLoop();
 
-app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ, report_time: REPORT_TIME, report_db: Boolean(REPORT_DS), push: BARK_KEY ? "bark" : "none", telegram: TELEGRAM_BOT_TOKEN ? { enabled: true, paired_chats: tgState.chats.length } : { enabled: false } }));
+app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ, report_time: REPORT_TIME, report_db: Boolean(REPORT_DS), push: BARK_KEY ? "bark" : "none", telegram: TELEGRAM_BOT_TOKEN ? { enabled: true, paired_chats: tgState.chats.length } : { enabled: false }, stt: STT ? { enabled: true, model: STT.model } : { enabled: false } }));
 
 const port = Number(process.env.PORT ?? 8787);
-serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ} report=${REPORT_TIME} push=${BARK_KEY ? "bark" : "none"} telegram=${TELEGRAM_BOT_TOKEN ? "on" : "off"}`));
+serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ} report=${REPORT_TIME} push=${BARK_KEY ? "bark" : "none"} telegram=${TELEGRAM_BOT_TOKEN ? "on" : "off"} stt=${STT ? STT.model : "off"}`));
