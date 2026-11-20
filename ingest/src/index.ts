@@ -191,7 +191,7 @@ async function uploadToNotion(jpeg: Buffer, filename: string): Promise<string> {
   return created.id as string;
 }
 
-function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: string | null, filename: string, source = "手机拍照") {
+function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: string | null, filename: string, source = "手机拍照", model = VISION_MODEL) {
   const sel = (name: string | null) => (name ? { select: { name } } : undefined);
   const multi = (names: string[]) => (names.length ? { multi_select: names.map((name) => ({ name })) } : undefined);
   const p: Record<string, any> = {
@@ -200,7 +200,7 @@ function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: s
     type: { select: { name: notionType(a.kind, a.categories) } },
     source: { select: { name: source } },
     confidence: { number: Math.round(a.confidence * 100) / 100 },
-    agent_note: { rich_text: [{ text: { content: `${a.notes} [${VISION_MODEL}]`.slice(0, 1900) } }] },
+    agent_note: { rich_text: [{ text: { content: `${a.notes} [${model}]`.slice(0, 1900) } }] },
   };
   if (a.items.length) p.items = { rich_text: [{ text: { content: a.items.join("、").slice(0, 1900) } }] };
   if (a.kcal !== null) p.kcal = { number: a.kcal };
@@ -749,16 +749,21 @@ async function tgBroadcast(messages: string[]): Promise<boolean> {
 }
 
 /** 文字记录（没照片）：同一套提示词，告诉模型这是文字描述。用 Haiku 当"分拣员"：是记录就结构化，不是记录（提问 / 聊天 / 命令）就 other，交给 agent。 */
-async function analyzeText(text: string, iso: string): Promise<Analysis> {
-  const raw = await askModel(
-    SYSTEM_PROMPT,
-    `${userPrompt(iso)}\n这次没有照片，用户发来一句话：「${text}」。\n只有当这句话是在**记录自己刚吃喝了什么或排便情况**时，才按同样的 JSON 格式输出（份量说不清就填 中）。如果它是提问、闲聊、命令、感想、或别的任何事，kind 一律填 "other"，不要猜。`,
-    700,
-    "claude-haiku-5-5",
-  );
-  const a = parseAnalysis(raw);
+async function analyzeText(text: string, iso: string): Promise<{ analysis: Analysis; model: string }> {
+  const prompt = `${userPrompt(iso)}\n这次没有照片，用户发来一句话：「${text}」。\n只有当这句话是在**记录自己刚吃喝了什么或排便情况**时，才按同样的 JSON 格式输出（份量说不清就填 中）。如果它是提问、闲聊、命令、感想、或别的任何事，kind 一律填 "other"，不要猜。无论哪种情况都只输出 JSON。`;
+  let model = "claude-haiku-5-5";
+  let raw = await askModel(SYSTEM_PROMPT, prompt, 700, model);
+  let a: Analysis;
+  try {
+    a = parseAnalysis(raw);
+  } catch {
+    // Haiku 偶尔不给 JSON（比如反问一句），换 Sonnet 再来一次
+    model = VISION_MODEL;
+    raw = await askModel(SYSTEM_PROMPT, prompt, 700, model);
+    a = parseAnalysis(raw);
+  }
   if (a.kind !== "stool" && a.kind !== "other" && !a.items.length) a.kind = "other"; // 没有具体食物就不算记录
-  return a;
+  return { analysis: a, model };
 }
 
 /** 把一句话交给 OpenClaw 的 agent（有 Notion、记忆、技能），同一个 Telegram 对话 = 同一个会话。 */
@@ -779,8 +784,9 @@ async function askAgent(chatId: number, text: string): Promise<string> {
 async function processText(text: string, source: string): Promise<PhotoResult> {
   const t = localTime(new Date(), TZ);
   let analysis: Analysis;
+  let model = VISION_MODEL;
   try {
-    analysis = await analyzeText(text, t.iso);
+    ({ analysis, model } = await analyzeText(text, t.iso));
   } catch (e: any) {
     return { ok: false, status: 502, message: `没记上：${modelErrorText(e)}` };
   }
@@ -791,7 +797,7 @@ async function processText(text: string, source: string): Promise<PhotoResult> {
   let notionError: string | null = null;
   let pageId: string | null = null;
   try {
-    const props = logProps(analysis, t.iso, meal, null, "", source);
+    const props = logProps(analysis, t.iso, meal, null, "", source, model);
     const page: any = await notion.pages.create({ parent: { type: "data_source_id", data_source_id: LOG_DS }, icon: { type: "emoji", emoji: iconFor(analysis.kind) }, properties: props, children: logBody(analysis, text) } as any);
     notionUrl = page.url ?? null;
     pageId = page.id ?? null;
