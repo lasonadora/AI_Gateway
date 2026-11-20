@@ -24,9 +24,8 @@
         fallbacks: ["${OPENCLAW_FALLBACK_MODEL}"],
       },
       utilityModel: "${OPENCLAW_UTILITY_MODEL}",   // 这个版本要求字符串（启动日志验证过）
-      // 心跳关掉。默认每 30 分钟一次，而且工作区没有 HEARTBEAT.md 时照样调模型（主模型失败还会再试备选），
-      // 全天 48 次 × 整个上下文，是 API 额度最大的隐性消耗。定时的事（日报、快照）全在 ingest 里做。
-      heartbeat: { every: "0m" },
+      // 注意：这个版本里 agents.defaults.heartbeat 已被移除（"Heartbeat configuration retired"），写了会让网关拒绝启动。
+      // 后台定时调模型的东西在 cron / memory-core 里管（见 README 省钱清单）。
     },
     entries: {
       // MVP 只有主 agent。杂事、开发以后各加一个 entry，用 bindings 路由。
