@@ -149,9 +149,8 @@ curl -s https://<域名>/ingest/health   # report_time / push 字段能看出配
 
 - **心跳关了**（`agents.defaults.heartbeat.every: "0m"`）。OpenClaw 默认每 30 分钟心跳一次，工作区没有 HEARTBEAT.md 时照样调模型，主模型失败还会试备选：一天 48 次 × 整个上下文，是最大的隐性消耗。日报、收盘快照这些定时活都在 ingest 里，不需要心跳。
 - **做梦关了**（`plugins.entries.memory-core.config.dreaming.enabled: false`）：每天跑子 agent 整理记忆写 DREAMS.md，现在用不上。
-- **日常聊天用 Haiku**（`OPENCLAW_PRIMARY_MODEL=anthropic/claude-haiku-5-5`，Sonnet 做备选）。需要重活时在会话里发 `/model anthropic/claude-sonnet-5-5` 临时切换。
-- ingest：看图留 Sonnet（一天几张，几分钱），日报文字 / 市场 / 新闻用 Haiku（`REPORT_MODEL`）。
-- Claude Pro/Max 订阅**不能**给 OpenClaw 用（2026-04-04 起 Anthropic 明令禁止第三方 harness 走订阅 OAuth），API 是单独按量计费：console.anthropic.com → Plans & Billing 买 credits，建议开 auto-reload 并在 Settings → Limits 设月上限。
+- 模型：聊天和日报默认 Sonnet（后台空转关掉后一个月也就十来美元），想更省就在 `.env` 里设 `OPENCLAW_PRIMARY_MODEL=anthropic/claude-haiku-5-5`、`REPORT_MODEL=claude-haiku-5-5`；会话里 `/model …` 可临时切。
+- Claude Pro/Max 订阅**不能**让 OpenClaw 直接走订阅 OAuth（2026-04-04 起 Anthropic 明令禁止），但 **Max 订阅每月附带 $100 API 额度**：platform.claude.com → Billing → "Link and claim" 领一次，之后每月自动发，API 走这笔钱。月上限设在 $100（Spend limits），$80 邮件提醒，这样永远不会额外掏钱。
 - 看花在哪：console 的 Usage 页按 API key / 模型分；服务器上 `docker logs vps-openclaw-1 | grep -c provider-error` 能看出有没有后台在空转。
 
 ## 阶段 3：身体指标日报（手表数据接上之后）

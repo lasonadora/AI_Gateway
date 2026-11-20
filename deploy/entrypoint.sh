@@ -27,8 +27,8 @@ const [tpl, out] = process.argv.slice(2);
 const defaults = {
   PORT: "18789",
   OPENCLAW_TZ: "Asia/Shanghai",
-  OPENCLAW_PRIMARY_MODEL: "anthropic/claude-haiku-5-5",   // 日常聊天用 Haiku（约 Sonnet 1/3 的价）；会话里 /model anthropic/claude-sonnet-5-5 可临时换
-  OPENCLAW_FALLBACK_MODEL: "anthropic/claude-sonnet-5-5",
+  OPENCLAW_PRIMARY_MODEL: "anthropic/claude-sonnet-5-5",  // Max 订阅每月含 $100 API 额度，后台空转关掉后 Sonnet 够用；想更省在 .env 里改成 haiku
+  OPENCLAW_FALLBACK_MODEL: "anthropic/claude-haiku-5-5",
   OPENCLAW_UTILITY_MODEL: "anthropic/claude-haiku-5-5",
   OPENCLAW_PUBLIC_ORIGIN: "",
   OPENCLAW_TRUSTED_PROXIES_JSON: "",
