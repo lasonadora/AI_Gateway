@@ -24,6 +24,9 @@
         fallbacks: ["${OPENCLAW_FALLBACK_MODEL}"],
       },
       utilityModel: "${OPENCLAW_UTILITY_MODEL}",   // 这个版本要求字符串（启动日志验证过）
+      // 心跳关掉。默认每 30 分钟一次，而且工作区没有 HEARTBEAT.md 时照样调模型（主模型失败还会再试备选），
+      // 全天 48 次 × 整个上下文，是 API 额度最大的隐性消耗。定时的事（日报、快照）全在 ingest 里做。
+      heartbeat: { every: "0m" },
     },
     entries: {
       // MVP 只有主 agent。杂事、开发以后各加一个 entry，用 bindings 路由。
@@ -34,6 +37,13 @@
   tools: {
     // 命令执行：白名单外的命令先问人。不设 "full"——它拿着你的数据干活。
     exec: { mode: "ask" },
+  },
+
+  // 后台"做梦"（记忆整理）也关掉：每天跑子 agent 写 DREAMS.md，花钱但对现在的用法没价值。
+  plugins: {
+    entries: {
+      "memory-core": { config: { dreaming: { enabled: false } } },
+    },
   },
 
   // Notion：agent 读写四个健康库的唯一通道。

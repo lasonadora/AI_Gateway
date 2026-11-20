@@ -145,6 +145,15 @@ curl -s https://<域名>/ingest/health   # report_time / push 字段能看出配
 
 本机流水：`/data/photos/reports.jsonl`，定时器状态：`/data/photos/report-state.json`（删掉它当天会再跑一次）。回美国后改 `.env` 里的 `OPENCLAW_TZ`，日报时间跟着时区走。
 
+### 省钱清单（API 花费从哪来、怎么压）
+
+- **心跳关了**（`agents.defaults.heartbeat.every: "0m"`）。OpenClaw 默认每 30 分钟心跳一次，工作区没有 HEARTBEAT.md 时照样调模型，主模型失败还会试备选：一天 48 次 × 整个上下文，是最大的隐性消耗。日报、收盘快照这些定时活都在 ingest 里，不需要心跳。
+- **做梦关了**（`plugins.entries.memory-core.config.dreaming.enabled: false`）：每天跑子 agent 整理记忆写 DREAMS.md，现在用不上。
+- **日常聊天用 Haiku**（`OPENCLAW_PRIMARY_MODEL=anthropic/claude-haiku-5-5`，Sonnet 做备选）。需要重活时在会话里发 `/model anthropic/claude-sonnet-5-5` 临时切换。
+- ingest：看图留 Sonnet（一天几张，几分钱），日报文字 / 市场 / 新闻用 Haiku（`REPORT_MODEL`）。
+- Claude Pro/Max 订阅**不能**给 OpenClaw 用（2026-04-04 起 Anthropic 明令禁止第三方 harness 走订阅 OAuth），API 是单独按量计费：console.anthropic.com → Plans & Billing 买 credits，建议开 auto-reload 并在 Settings → Limits 设月上限。
+- 看花在哪：console 的 Usage 页按 API key / 模型分；服务器上 `docker logs vps-openclaw-1 | grep -c provider-error` 能看出有没有后台在空转。
+
 ## 阶段 3：身体指标日报（手表数据接上之后）
 
 完成标志：07:30 的 automation 跑出第一份身体指标日报进报告库，并推到手机。
