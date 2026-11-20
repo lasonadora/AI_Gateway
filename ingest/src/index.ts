@@ -834,7 +834,10 @@ async function tgHandle(msg: any) {
       }
       // 不是记录 → 交给 agent 聊 / 干活
       try {
-        await tgSendPlain(chatId, await askAgent(chatId, text));
+        const t0 = Date.now();
+        const answer = await askAgent(chatId, text);
+        console.log(`[tg] agent ${chatId} ${Math.round((Date.now() - t0) / 1000)}s "${text.slice(0, 40)}" -> ${answer.length} chars`);
+        await tgSendPlain(chatId, answer);
       } catch (e: any) {
         console.error("[tg] agent 失败", e?.message ?? e);
         await tgSend(chatId, `agent 没回：${esc(String(e?.message ?? e).slice(0, 160))}`);
