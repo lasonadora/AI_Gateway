@@ -1,6 +1,7 @@
 // 日报的纯逻辑：把「记录 Log」一天的行统计成数字、按规则列异常、拼给模型的提示词、校验模型输出、生成 Notion 页面。
 // 所有数字都在这里算，模型只负责"说人话"。不碰网络，方便用 node:test 测。
 import { MEALS, type Meal, localTime } from "./photo.ts";
+import { sumMacros, type Totals, type Targets } from "./nutrition.ts";
 
 /** 五大基础类别：覆盖几类 × 20 = 均衡度（0–100）。规则简单透明，不是营养学评分。 */
 export const BASIC_GROUPS = ["主食", "蛋白", "蔬菜", "水果", "乳制品"] as const;
@@ -20,6 +21,10 @@ export interface LogEntry {
   categories: string[];
   portion: string | null;
   calorie_band: string | null;
+  kcal: number | null;
+  protein_g: number | null;
+  fat_g: number | null;
+  carb_g: number | null;
   bristol: number | null;
   flags: string[];
   confidence: number | null;
@@ -42,6 +47,8 @@ export interface DayStats {
   covered: string[]; // 五大类里覆盖到的
   missing_groups: string[]; // 五大类里没碰的
   balance_score: number | null; // 没饮食记录时为 null
+  totals: Totals; // 当天热量 / 三大营养素累计（只算有数字的记录）
+  targets: Targets | null;
   bristol: number[];
   flags: string[]; // 当天所有记录的 flags 并集
   red_flag: boolean; // 带血 / 黑便
@@ -81,6 +88,10 @@ export function fromNotionPage(page: any, tz: string): LogEntry {
     categories: (p.categories?.multi_select ?? []).map((o: any) => o.name),
     portion: p.portion?.select?.name ?? null,
     calorie_band: p.calorie_band?.select?.name ?? null,
+    kcal: typeof p.kcal?.number === "number" ? p.kcal.number : null,
+    protein_g: typeof p.protein_g?.number === "number" ? p.protein_g.number : null,
+    fat_g: typeof p.fat_g?.number === "number" ? p.fat_g.number : null,
+    carb_g: typeof p.carb_g?.number === "number" ? p.carb_g.number : null,
     bristol: typeof p.bristol?.number === "number" ? p.bristol.number : null,
     flags: (p.flags?.multi_select ?? []).map((o: any) => o.name),
     confidence: typeof p.confidence?.number === "number" ? p.confidence.number : null,
@@ -98,7 +109,7 @@ export function dayWindow(ymd: string, tz: string): { start: string; end: string
 const isDiet = (e: LogEntry) => e.type === "饮食" || e.type === "咖啡因" || e.type === "酒精";
 const isStool = (e: LogEntry) => e.type === "排便";
 
-export function summarize(entries: LogEntry[], date: string, cutoff = "23:59"): DayStats {
+export function summarize(entries: LogEntry[], date: string, cutoff = "23:59", targets: Targets | null = null): DayStats {
   const sorted = [...entries].sort((a, b) => a.iso.localeCompare(b.iso));
   const diet = sorted.filter(isDiet);
   const stools = sorted.filter(isStool);
@@ -141,6 +152,8 @@ export function summarize(entries: LogEntry[], date: string, cutoff = "23:59"): 
     covered: [...covered],
     missing_groups: [...missing_groups],
     balance_score: diet.length ? covered.length * 20 : null,
+    totals: sumMacros(diet),
+    targets,
     bristol,
     flags,
     red_flag: flags.includes("带血") || flags.includes("黑便"),
@@ -167,6 +180,7 @@ export function anomaliesOf(s: DayStats): string[] {
   if (n("咖啡因") >= 3) out.push(`咖啡因 ${n("咖啡因")} 次`);
   if (n("油炸") + n("外卖") >= 2) out.push(`油炸/外卖 ${n("油炸") + n("外卖")} 次`);
   if (s.diet.length >= 2 && !n("蔬菜")) out.push("一天没有蔬菜");
+  if (s.targets && s.totals.counted && s.totals.kcal > s.targets.kcal * 1.15) out.push(`热量超目标 ${Math.round(s.totals.kcal - s.targets.kcal)} 千卡`);
   return out;
 }
 
@@ -204,6 +218,8 @@ export function reportUserPrompt(s: DayStats): string {
     covered_groups: s.covered,
     missing_groups: s.missing_groups,
     balance_score: s.balance_score,
+    intake: s.totals.counted ? { kcal: Math.round(s.totals.kcal), protein_g: Math.round(s.totals.protein_g), fat_g: Math.round(s.totals.fat_g), carb_g: Math.round(s.totals.carb_g), records_without_numbers: s.totals.missing } : null,
+    targets: s.targets,
     stool_count: s.stools.length,
     bristol: s.bristol,
     anomalies: s.anomalies,
@@ -257,7 +273,7 @@ const para = (t: string) => block("paragraph", [txt(t)]);
 /** 一行一条记录：时间 · 餐次 · [页面 mention（标题）] · 份量/热量档 · 标记。mention 会显示页面标题，所以不再重复写食物。 */
 function entryLine(e: LogEntry): any[] {
   const head = [e.hm, e.meal].filter(Boolean).join(" · ");
-  const tail = [[e.portion, e.calorie_band].filter(Boolean).join("/"), e.flags.join(" ")].filter(Boolean).join(" · ");
+  const tail = [[e.portion, e.calorie_band].filter(Boolean).join("/"), e.kcal !== null ? `约 ${e.kcal} 千卡` : "", e.flags.join(" ")].filter(Boolean).join(" · ");
   const rt: any[] = [txt(`${head} · `)];
   rt.push(e.id ? mention(e.id) : txt(e.items.length ? e.items.join("、") : e.title));
   if (tail) rt.push(txt(` · ${tail}`));
@@ -297,6 +313,11 @@ export function reportBlocks(s: DayStats, n: Narrative, model: string): any[] {
   out.push(bullet([txt(`五大类：${BASIC_GROUPS.map((g) => `${g}${s.covered.includes(g) ? "✓" : "✗"}`).join(" ")}`)]));
   const watch = WATCH_GROUPS.map((g) => [g, s.categories[g] ?? 0] as const).filter(([, c]) => c > 0);
   if (watch.length) out.push(bullet([txt(`留意：${watch.map(([g, c]) => `${g} ${c}`).join("，")}`)]));
+  if (s.totals.counted) {
+    const t = s.totals;
+    const g = s.targets;
+    out.push(bullet([txt(`摄入：约 ${Math.round(t.kcal)} 千卡${g ? ` / 目标 ${g.kcal}` : ""} · 蛋白 ${Math.round(t.protein_g)}g${g ? `/${g.protein_g}` : ""} · 脂肪 ${Math.round(t.fat_g)}g${g ? `/${g.fat_g}` : ""} · 碳水 ${Math.round(t.carb_g)}g${g ? `/${g.carb_g}` : ""}${t.missing ? `（${t.missing} 条老记录没数字）` : ""}`)]));
+  }
   const cal = Object.entries(s.calorie);
   if (cal.length) out.push(bullet([txt(`热量档：${cal.map(([k, v]) => `${k} ${v}`).join("，")}`)]));
   out.push(bullet([txt(s.balance_score === null ? "均衡度：—（没有饮食记录）" : `均衡度：${s.balance_score}/100（五大类覆盖 ${s.covered.length} × 20）`)]));
@@ -334,5 +355,11 @@ export function reportProps(s: DayStats, n: Narrative, model: string): Record<st
   };
   if (s.balance_score !== null) p.status_score = { number: s.balance_score };
   if (s.flags.length) p.flags = { multi_select: s.flags.map((name) => ({ name })) };
+  if (s.totals.counted) {
+    p.kcal = { number: Math.round(s.totals.kcal) };
+    p.protein_g = { number: Math.round(s.totals.protein_g) };
+    p.fat_g = { number: Math.round(s.totals.fat_g) };
+    p.carb_g = { number: Math.round(s.totals.carb_g) };
+  }
   return p;
 }

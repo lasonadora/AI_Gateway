@@ -17,6 +17,10 @@ function entry(over: Partial<LogEntry>): LogEntry {
     categories: [],
     portion: "中",
     calorie_band: "中",
+    kcal: null,
+    protein_g: null,
+    fat_g: null,
+    carb_g: null,
     bristol: null,
     flags: [],
     confidence: 0.8,
@@ -88,6 +92,29 @@ test("summarize：正餐去重、五大类覆盖、均衡度、标记并集", ()
   assert.ok(s.anomalies.includes("没有晚餐记录"));
   assert.ok(s.anomalies.includes("夜宵 1 次"));
   assert.ok(s.anomalies.includes("糖饮 1 次"));
+});
+
+test("summarize：热量累计、目标超标异常、报告属性", () => {
+  const s = summarize(
+    [
+      entry({ id: "a", meal: "早餐", kcal: 500, protein_g: 20, fat_g: 15, carb_g: 60, categories: ["主食", "蛋白"], iso: "2026-11-18T08:00:00+08:00" }),
+      entry({ id: "b", meal: "午餐", kcal: 1200, protein_g: 40, fat_g: 50, carb_g: 150, categories: ["主食", "蛋白", "蔬菜"], iso: "2026-11-18T12:00:00+08:00" }),
+      entry({ id: "c", meal: "晚餐", kcal: 900, protein_g: 30, fat_g: 40, carb_g: 100, categories: ["主食"], iso: "2026-11-18T19:00:00+08:00" }),
+      entry({ id: "d", meal: "加餐", categories: ["水果"], iso: "2026-11-18T15:00:00+08:00" }), // 老记录没数字
+    ],
+    "2026-11-18",
+    "21:30",
+    { kcal: 2000, protein_g: 120, fat_g: 65, carb_g: 250 },
+  );
+  assert.equal(s.totals.kcal, 2600);
+  assert.equal(s.totals.counted, 3);
+  assert.equal(s.totals.missing, 1);
+  assert.ok(s.anomalies.includes("热量超目标 600 千卡"));
+  const props = reportProps(s, parseNarrative("", s), "m");
+  assert.equal(props.kcal.number, 2600);
+  assert.equal(props.protein_g.number, 90);
+  const blocks = reportBlocks(s, parseNarrative("", s), "m");
+  assert.ok(blocks.some((b) => b.type === "bulleted_list_item" && b.bulleted_list_item.rich_text[0].text.content.startsWith("摄入：约 2600 千卡 / 目标 2000")));
 });
 
 test("summarize：没饮食记录时均衡度为 null，也不报漏餐", () => {

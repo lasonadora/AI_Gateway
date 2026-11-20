@@ -14,7 +14,11 @@ export interface Analysis {
   items: string[]; // 饮食/饮品：识别出的食物
   categories: string[]; // 饮食：类别（只保留 CATEGORIES 里的）
   portion: "小" | "中" | "大" | null;
-  calorie_band: "轻" | "中" | "重" | null;
+  calorie_band: "轻" | "中" | "重" | null; // 由 kcal 推出来（代码），模型给的只在没有 kcal 时兜底
+  kcal: number | null; // 饮食/饮品：本人这一顿的估算热量（千卡）
+  protein_g: number | null;
+  fat_g: number | null;
+  carb_g: number | null;
   bristol: number | null; // 排便：1-7
   flags: string[]; // 只保留 FLAGS 里的
   confidence: number; // 0-1
@@ -67,6 +71,10 @@ JSON 字段（全部必填，不适用的填 null 或空数组）：
   "categories": ["只能从这个列表里选：${CATEGORIES.join("、")}"],
   "portion": "小" | "中" | "大" | null,
   "calorie_band": "轻" | "中" | "重" | null,
+  "kcal": 整数 | null,
+  "protein_g": 整数 | null,
+  "fat_g": 整数 | null,
+  "carb_g": 整数 | null,
   "bristol": 1 到 7 的整数 | null,
   "flags": ["只能从这个列表里选：${FLAGS.join("、")}"],
   "confidence": 0 到 1 的小数,
@@ -78,6 +86,7 @@ JSON 字段（全部必填，不适用的填 null 或空数组）：
 - items 要把画面里每一样吃的都列出来（主菜、配菜、主食、汤、饮料、酱料都算），中式菜名用常见叫法。
 - categories 必须覆盖 items 里的每一样：米饭/面/馒头/饺子/面包/粉 → 主食；肉/鱼/虾/蛋/豆腐/火腿/香肠 → 蛋白；叶菜/根茎/菌菇 → 蔬菜；水果 → 水果；奶/酸奶/奶酪 → 乳制品；含糖饮料/奶茶/果汁 → 糖饮；咖啡/浓茶/能量饮料 → 咖啡因；酒 → 酒精；薯片/糕点/糖果 → 零食；油炸或明显重油 → 油炸；外卖包装/一次性餐盒 → 外卖。一样东西可以同时属于多个类别。
 - portion 以一个成年人一餐的量为"中"。calorie_band：轻 ≈ 400 千卡以下，中 ≈ 400–800，重 ≈ 800 以上，只是粗档位；主食和油多就往上走。
+- kcal / protein_g / fat_g / carb_g：像营养师看一眼餐盘那样，按**用户本人这一顿吃进去的量**估算整份的热量（千卡）和三大营养素（克），给整数。桌上明显是多人份的菜，按一人份估算并在 notes 里说明"按一人份估"。参考：一碗米饭 ≈ 230 千卡 / 5g 蛋白 / 50g 碳水；一个鸡蛋 ≈ 75 千卡 / 6g 蛋白 / 5g 脂肪；100g 瘦肉 ≈ 150–250 千卡 / 20–25g 蛋白；一杯 250ml 全脂牛奶 ≈ 150 千卡 / 8g 蛋白 / 8g 脂肪 / 12g 碳水；炒菜每道按 1–2 勺油 (10–20g, 90–180 千卡) 算；外卖和油炸往上估。看不出量就给中等份的估计并降低 confidence，不要留空。饮品同样估。
 - 「夜宵」「大份」这两个 flag 不要你判断：夜宵由时间决定，大份只在 portion 为「大」时由系统加。
 - 排便用 Bristol 分型：1 硬球状难排、2 结块香肠状、3 香肠状表面有裂纹、4 光滑柔软香肠状（理想）、5 软团块边缘清楚、6 糊状边缘不清、7 水样无固体。
 - 排便 flags：看到鲜红或暗红 → 「带血」；柏油样黑亮 → 「黑便」；6 或 7 型 → 「腹泻」；1 或 2 型 → 「便秘」；灰白、陶土色、明显绿色 → 「颜色异常」。
@@ -123,6 +132,10 @@ export function parseAnalysis(raw: string): Analysis {
     categories: kind === "meal" || kind === "drink" ? strArr(obj.categories, CATEGORIES) : [],
     portion: kind === "meal" || kind === "drink" ? oneOf(obj.portion, ["小", "中", "大"] as const) : null,
     calorie_band: kind === "meal" || kind === "drink" ? oneOf(obj.calorie_band, ["轻", "中", "重"] as const) : null,
+    kcal: kind === "meal" || kind === "drink" ? clampInt(num(obj.kcal), 0, 5000) : null,
+    protein_g: kind === "meal" || kind === "drink" ? clampInt(num(obj.protein_g), 0, 500) : null,
+    fat_g: kind === "meal" || kind === "drink" ? clampInt(num(obj.fat_g), 0, 500) : null,
+    carb_g: kind === "meal" || kind === "drink" ? clampInt(num(obj.carb_g), 0, 1000) : null,
     bristol: kind === "stool" ? bristol : null,
     flags,
     confidence,
@@ -135,7 +148,16 @@ export function parseAnalysis(raw: string): Analysis {
     if (a.bristol <= 2 && !a.flags.includes("便秘")) a.flags.push("便秘");
   }
   if ((a.kind === "meal" || a.kind === "drink") && a.portion === "大") a.flags.push("大份");
+  // 热量档位由 kcal 推出来，和数字保持一致
+  if (a.kcal !== null) a.calorie_band = calorieBand(a.kcal);
   return a;
+}
+
+const clampInt = (v: number | null, lo: number, hi: number) => (v === null ? null : Math.min(hi, Math.max(lo, Math.round(v))));
+
+/** 轻 < 400，中 400–800，重 > 800（和提示词里的档位一致）。 */
+export function calorieBand(kcal: number): "轻" | "中" | "重" {
+  return kcal < 400 ? "轻" : kcal <= 800 ? "中" : "重";
 }
 
 /** Notion 的 type 选项：饮品按内容归到 酒精 / 咖啡因，其余饮食 */

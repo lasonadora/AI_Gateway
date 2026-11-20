@@ -133,6 +133,10 @@ iPhone 快捷指令（装一次，之后一键）：
 
 这样设计的原因：记录这条路必须确定、便宜、可测（代码拿数字），聊天这条路要聪明、有记忆、能用工具（agent）。两条路共用一个 bot、一个对话。
 
+每条饮食记录会带**热量和三大营养素的估算**（模型像营养师看餐盘那样估本人这一顿：`kcal / protein_g / fat_g / carb_g`，存进「记录」的四个数字列；热量档位 轻/中/重 由 kcal 推出），回复里附三行：这顿多少、今天累计 / 目标、蛋白 脂肪 碳水还差多少。目标默认 2000 千卡 / 蛋白 120g / 脂肪 65g / 碳水 250g，Telegram 里 `/target 2000 120 65 250` 改，`/today` 看今天累计。日报的「统计」和报告库的 `kcal/protein_g/fat_g/carb_g` 也带当天合计，超目标 15% 以上列入异常。`POST /ingest/text {"text":"一杯豆浆"}`（Bearer）是文字记录的 HTTP 入口，给快捷指令用。
+
+安卓没有"快捷指令"，一键入口就是 Telegram：长按 bot 对话 → Add to Home Screen；打开后点 📎 → 相机 → 拍 → 发，三四下；或者相机拍完 Share → Telegram → 这个 bot。想要真正一键（桌面图标 → 相机 → 自动上传），装 **HTTP Shortcuts**（开源，F-Droid / GitHub 有 APK）建一个 POST `https://<域名>/ingest/photo` 的快捷方式：Header `Authorization: Bearer <INGEST_TOKEN>`，文件参数 `photo` 选"拍照"，响应显示 JSON 里的 `message`。
+
 推送到 iPhone 也可以用 **Bark**（App Store 免费，国内直连，走 APNs）：装好 → 首页复制 device key → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `BARK_KEY` → 会重启服务。没配 Bark 就只写 Notion。配了以后：每拍一张照片服务器立刻推一条"已记录 · 早餐 …"（时效性通知，能穿过专注模式 / 屏幕使用时间的停用时间；快捷指令里自己的"显示通知"那步可以删掉），排便识别出带血 / 黑便会推警示，不等日报。
 
 屏幕使用时间开了"停用时间"的话：设置 → 屏幕使用时间 → 始终允许 → 把 **快捷指令**、**相机**、**Bark** 加进去，否则停用时段按一下操作按钮可能没反应或没通知。

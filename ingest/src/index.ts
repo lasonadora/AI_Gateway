@@ -17,6 +17,7 @@ import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionTy
 import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserPrompt, parseNarrative, pushText, reportBlocks, reportProps, type DayStats, type Narrative } from "./report.ts";
 import { DEFAULT_TICKERS, NEWS_QUERY, parseYahooChart, parseCnbcQuotes, updateHistory, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief, type History } from "./brief.ts";
 import { parseCommand, reportMessages, recordReply, esc, HELP_TEXT, PAIR_HINT } from "./telegram.ts";
+import { DEFAULT_TARGETS, sumMacros, nutritionLines, parseTargets, targetsLine, type Targets } from "./nutrition.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -202,6 +203,10 @@ function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: s
     agent_note: { rich_text: [{ text: { content: `${a.notes} [${VISION_MODEL}]`.slice(0, 1900) } }] },
   };
   if (a.items.length) p.items = { rich_text: [{ text: { content: a.items.join("、").slice(0, 1900) } }] };
+  if (a.kcal !== null) p.kcal = { number: a.kcal };
+  if (a.protein_g !== null) p.protein_g = { number: a.protein_g };
+  if (a.fat_g !== null) p.fat_g = { number: a.fat_g };
+  if (a.carb_g !== null) p.carb_g = { number: a.carb_g };
   const set = (k: string, v: any) => v !== undefined && (p[k] = v);
   if (a.kind === "meal" || a.kind === "drink") {
     set("meal", sel(meal));
@@ -251,6 +256,29 @@ app.post("/ingest/hae", async (c) => {
 });
 
 // multipart/form-data：photo=<文件>，可选 note=<文字>，可选 taken_at=<ISO 时间>
+/** 今天累计（Notion 记录库里有数字的饮食记录），可排除刚写入的那一页（避免读到旧快照后再加一次）。 */
+async function todayTotals(excludePageId: string | null, extra: Analysis | null) {
+  const ymd = localTime(new Date(), TZ).ymd;
+  const entries = (await fetchDayEntries(ymd)).filter((e) => e.id !== excludePageId && (e.type === "饮食" || e.type === "咖啡因" || e.type === "酒精"));
+  const rows = entries.map((e) => ({ kcal: e.kcal, protein_g: e.protein_g, fat_g: e.fat_g, carb_g: e.carb_g }));
+  if (extra && (extra.kind === "meal" || extra.kind === "drink")) rows.push({ kcal: extra.kcal, protein_g: extra.protein_g, fat_g: extra.fat_g, carb_g: extra.carb_g });
+  return sumMacros(rows);
+}
+async function currentTargets(): Promise<Targets> {
+  return (await loadState()).targets ?? DEFAULT_TARGETS;
+}
+/** 记录完一顿后附在回复后面的三行：这顿多少、今天累计、还差多少。拿不到就空数组，不影响记录。 */
+async function intakeLines(a: Analysis, pageId: string | null): Promise<string[]> {
+  if (a.kind !== "meal" && a.kind !== "drink") return [];
+  try {
+    const [totals, targets] = await Promise.all([todayTotals(pageId, a), currentTargets()]);
+    return nutritionLines(a, totals, targets);
+  } catch (e: any) {
+    console.error("[intake] 累计失败", e?.message ?? e);
+    return a.kcal !== null ? [`这顿约 ${a.kcal} 千卡（蛋白 ${a.protein_g ?? "?"}g · 脂肪 ${a.fat_g ?? "?"}g · 碳水 ${a.carb_g ?? "?"}g）`] : [];
+  }
+}
+
 interface PhotoResult {
   ok: boolean;
   status: number; // 给 HTTP 用
@@ -304,6 +332,7 @@ async function processPhoto(original: Buffer, opts: { ext?: string; note?: strin
   // 4) Notion：其他照片不进库（文件已留在盘上），饭和排便进「记录」
   let notionUrl: string | null = null;
   let notionError: string | null = null;
+  let pageId: string | null = null;
   if (analysis.kind !== "other") {
     try {
       let uploadId: string | null = null;
@@ -319,6 +348,7 @@ async function processPhoto(original: Buffer, opts: { ext?: string; note?: strin
         children: logBody(analysis, note),
       } as any);
       notionUrl = page.url ?? null;
+      pageId = page.id ?? null;
     } catch (e: any) {
       notionError = String(e?.message ?? e);
       console.error("[photo] 写 Notion 失败", notionError);
@@ -339,7 +369,8 @@ async function processPhoto(original: Buffer, opts: { ext?: string; note?: strin
       : analysis.kind === "stool"
         ? `排便 · Bristol ${analysis.bristol ?? "?"}${analysis.flags.length ? ` · ${analysis.flags.join("/")}` : ""}`
         : `${meal ?? ""} ${analysis.title}${analysis.calorie_band ? ` · ${analysis.calorie_band}` : ""}`.trim();
-  const message = [headline, analysis.notes, analysis.red_flag ? "⚠️ 建议尽快就医，这不是诊断。" : "", notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
+  const intake = await intakeLines(analysis, pageId);
+  const message = [headline, analysis.notes, ...intake, analysis.red_flag ? "⚠️ 建议尽快就医，这不是诊断。" : "", notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
 
   // 7) Bark（可选）。Telegram 入口自己回消息，不走这里。
   if (source !== "Telegram") {
@@ -480,6 +511,7 @@ function nyNow(): { date: string; hm: string } {
 // ---------- 日报 ----------
 
 interface ReportState {
+  targets?: Targets; // 每日热量 / 三大营养素目标（/target 改）
   last_daily?: string; // 最近一次自动日报的日期
   last_close_snapshot?: string; // 最近一次收盘快照对应的纽约日期
   latest?: { date: string; title: string; body: string; summary: string; suggestion: string; notion_url: string | null; generated_at: string };
@@ -537,7 +569,7 @@ async function runDailyReport(ymd: string, opts: { push: boolean; cutoff?: strin
       return null;
     }),
   ]);
-  const stats: DayStats = summarize(entries, ymd, cutoff);
+  const stats: DayStats = summarize(entries, ymd, cutoff, await currentTargets());
 
   let narrative: Narrative;
   if (!entries.length) {
@@ -588,6 +620,21 @@ async function reportGuarded(ymd: string, opts: { push: boolean; cutoff?: string
     reportRunning = false;
   }
 }
+
+// 文字记录（没照片）：快捷指令 / 测试用。body: {"text": "一杯豆浆"} 或表单字段 text
+app.post("/ingest/text", async (c) => {
+  if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
+  let text = "";
+  const ct = c.req.header("content-type") ?? "";
+  if (ct.includes("application/json")) text = String((await c.req.json().catch(() => ({})))?.text ?? "");
+  else text = String((await c.req.parseBody().catch(() => ({})))["text"] ?? "");
+  text = text.trim();
+  if (!text) return c.json({ error: "缺少 text" }, 400);
+  const r = await processText(text, "快捷指令");
+  if (r.kind === "other") return c.json({ ok: true, logged: false, message: "没看出是在记吃喝 / 排便，没记。" });
+  void tgBroadcast([`✍️ ${recordReply(r)}`]);
+  return c.json({ ok: r.ok, logged: r.ok, message: r.message, kind: r.kind, title: r.title, meal: r.meal, analysis: r.analysis, notion_url: r.notion_url });
+});
 
 app.post("/ingest/report/run", async (c) => {
   if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
@@ -742,16 +789,19 @@ async function processText(text: string, source: string): Promise<PhotoResult> {
   if (meal === "夜宵" && !analysis.flags.includes("夜宵")) analysis.flags.push("夜宵");
   let notionUrl: string | null = null;
   let notionError: string | null = null;
+  let pageId: string | null = null;
   try {
     const props = logProps(analysis, t.iso, meal, null, "", source);
     const page: any = await notion.pages.create({ parent: { type: "data_source_id", data_source_id: LOG_DS }, icon: { type: "emoji", emoji: iconFor(analysis.kind) }, properties: props, children: logBody(analysis, text) } as any);
     notionUrl = page.url ?? null;
+    pageId = page.id ?? null;
   } catch (e: any) {
     notionError = String(e?.message ?? e);
   }
   await appendFile(join(PHOTO_DIR, "log.jsonl"), JSON.stringify({ at: t.iso, source, text, meal, ...analysis, notion: notionUrl, notion_error: notionError }) + "\n");
   const headline = analysis.kind === "stool" ? `排便 · Bristol ${analysis.bristol ?? "?"}` : `${meal ?? ""} ${analysis.title}${analysis.calorie_band ? ` · ${analysis.calorie_band}` : ""}`.trim();
-  const message = [headline, analysis.notes, notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
+  const intake = await intakeLines(analysis, pageId);
+  const message = [headline, analysis.notes, ...intake, notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
   console.log(`[text] ${t.iso} ${source} ${analysis.kind} "${analysis.title}" notion=${notionUrl ?? notionError}`);
   return { ok: !notionError, status: 200, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl, red_flag: analysis.red_flag };
 }
@@ -792,6 +842,31 @@ async function tgHandle(msg: any) {
   }
   if (cmd?.name === "start" || cmd?.name === "help") {
     await tgSend(chatId, HELP_TEXT);
+    return;
+  }
+  if (cmd?.name === "target") {
+    const parsed = parseTargets(cmd.arg);
+    if (parsed === "bad") {
+      await tgSend(chatId, "格式：<code>/target 热量 蛋白 脂肪 碳水</code>，比如 <code>/target 2000 120 65 250</code>");
+      return;
+    }
+    if (parsed) {
+      const st = await loadState();
+      st.targets = parsed;
+      await saveState(st);
+      await tgSend(chatId, `已更新。${esc(targetsLine(parsed))}`);
+      return;
+    }
+    await tgSend(chatId, esc(targetsLine(await currentTargets())));
+    return;
+  }
+  if (cmd?.name === "today") {
+    try {
+      const [totals, targets] = await Promise.all([todayTotals(null, null), currentTargets()]);
+      await tgSend(chatId, esc(nutritionLines(null, totals, targets).join("\n")));
+    } catch (e: any) {
+      await tgSend(chatId, `查不到：${esc(String(e?.message ?? e).slice(0, 160))}`);
+    }
     return;
   }
   if (cmd?.name === "report") {

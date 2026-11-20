@@ -5,7 +5,7 @@ import { fmtPct } from "./brief.ts";
 
 export const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-export type Command = { name: "start" | "help" | "pair" | "report" | "unpair"; arg: string } | null;
+export type Command = { name: "start" | "help" | "pair" | "report" | "unpair" | "target" | "today"; arg: string } | null;
 
 /** "/pair abc" → {name:"pair", arg:"abc"}；"/report@my_bot" 也认；不是命令返回 null。 */
 export function parseCommand(text: string | undefined): Command {
@@ -14,7 +14,7 @@ export function parseCommand(text: string | undefined): Command {
   if (!m) return null;
   const name = m[1].toLowerCase();
   const arg = (m[2] ?? "").trim();
-  if (name === "start" || name === "help" || name === "pair" || name === "report" || name === "unpair") return { name, arg };
+  if (name === "start" || name === "help" || name === "pair" || name === "report" || name === "unpair" || name === "target" || name === "today") return { name, arg };
   return { name: "help", arg: "" };
 }
 
@@ -23,6 +23,8 @@ export const HELP_TEXT = [
   "• 发<b>照片</b>：饭、饮品、排便都行，识别后写进 Notion「记录」并回你结果（照片说明一起记）。",
   "• 发一句<b>记录</b>：比如「两个包子一杯豆浆」，也会记。",
   "• 发<b>别的任何话</b>：问题、闲聊、让它查 Notion、让它干活——都转给 OpenClaw 的 agent（Sonnet），同一个对话会记得上下文。",
+  "• /today  今天到现在吃了多少热量、蛋白 / 脂肪 / 碳水还差多少",
+  "• /target 2000 120 65 250  设每日目标（热量 蛋白 脂肪 碳水），只发 /target 看当前",
   "• /report  现在生成今天的日报并发到这里",
   "• /pair &lt;INGEST_TOKEN&gt;  配对（第一次用）  · /unpair 取消配对",
   "每天 21:30 日报会自动发到这里。",
