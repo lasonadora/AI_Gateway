@@ -19,12 +19,12 @@ export function parseCommand(text: string | undefined): Command {
 }
 
 export const HELP_TEXT = [
-  "这是你的健康记录 bot。",
-  "• 直接发<b>照片</b>：饭、饮品、排便都行，我识别后写进 Notion「记录」并回你结果。照片说明文字会一起记。",
-  "• 直接发<b>文字</b>：比如「两个包子一杯豆浆」，也会记。",
+  "这是你的私人 agent 入口。",
+  "• 发<b>照片</b>：饭、饮品、排便都行，识别后写进 Notion「记录」并回你结果（照片说明一起记）。",
+  "• 发一句<b>记录</b>：比如「两个包子一杯豆浆」，也会记。",
+  "• 发<b>别的任何话</b>：问题、闲聊、让它查 Notion、让它干活——都转给 OpenClaw 的 agent（Sonnet），同一个对话会记得上下文。",
   "• /report  现在生成今天的日报并发到这里",
-  "• /pair &lt;INGEST_TOKEN&gt;  配对（第一次用）",
-  "• /unpair  取消这个对话的配对",
+  "• /pair &lt;INGEST_TOKEN&gt;  配对（第一次用）  · /unpair 取消配对",
   "每天 21:30 日报会自动发到这里。",
 ].join("\n");
 

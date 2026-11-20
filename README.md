@@ -129,7 +129,9 @@ iPhone 快捷指令（装一次，之后一键）：
 2. 服务器：`sudo bash /opt/ai_gateway/deploy/vps/secrets.sh`，粘进 `TELEGRAM_BOT_TOKEN`（会重启服务）。
 3. 打开这个 bot 的对话，发 `/pair <INGEST_TOKEN>`（和快捷指令里那串一样）。配对信息存在 `/data/photos/telegram-state.json`，没配对的对话一律不理。
 
-之后：发**照片**（饭 / 饮品 / 排便，说明文字一起记）或**文字**（"两个包子一杯豆浆"）→ 识别 → 写 Notion「记录」→ 回你结果；`/report` 立刻生成今天的日报发到对话里；每天 21:30 日报自动发；快捷指令拍的照片也会回一条到 Telegram。国内要挂 VPN，到美国不用。安卓把这个对话"添加到主屏幕"就是一键入口。
+之后：发**照片**（饭 / 饮品 / 排便，说明文字一起记）或一句**记录**（"两个包子一杯豆浆"）→ 识别 → 写 Notion「记录」→ 回你结果；**别的任何话**（提问、闲聊、让它查 Notion、让它干活）由 Haiku 先分拣，不是记录就转给 OpenClaw 的 agent（走网关的 OpenAI 兼容接口 `/v1/chat/completions`，`user=telegram:<chatId>` 让同一个对话共享一个 agent 会话），回答原样发回来；`/report` 立刻生成今天的日报发到对话里；每天 21:30 日报自动发；快捷指令拍的照片也会回一条到 Telegram。国内要挂 VPN，到美国不用。安卓把这个对话"添加到主屏幕"就是一键入口。
+
+这样设计的原因：记录这条路必须确定、便宜、可测（代码拿数字），聊天这条路要聪明、有记忆、能用工具（agent）。两条路共用一个 bot、一个对话。
 
 推送到 iPhone 也可以用 **Bark**（App Store 免费，国内直连，走 APNs）：装好 → 首页复制 device key → 服务器上 `sudo bash /opt/ai_gateway/deploy/vps/secrets.sh` 粘进 `BARK_KEY` → 会重启服务。没配 Bark 就只写 Notion。配了以后：每拍一张照片服务器立刻推一条"已记录 · 早餐 …"（时效性通知，能穿过专注模式 / 屏幕使用时间的停用时间；快捷指令里自己的"显示通知"那步可以删掉），排便识别出带血 / 黑便会推警示，不等日报。
 

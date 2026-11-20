@@ -43,6 +43,8 @@ const BRIEF_TICKERS = (process.env.BRIEF_TICKERS ?? DEFAULT_TICKERS.join(",")).s
 const BRIEF_MAX_CHARS = Number(process.env.BRIEF_MAX_CHARS) > 0 ? Number(process.env.BRIEF_MAX_CHARS) : 500;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ""; // 健康记录 bot；空 = 不启用
 const TG_STATE_FILE = join(PHOTO_DIR, "telegram-state.json");
+const GATEWAY_URL = (process.env.OPENCLAW_URL || "http://openclaw:18789").replace(/\/$/, ""); // 同一个 compose 网络里的网关
+const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || ""; // 和 .env 里网关的 token 一样；空 = 不转发给 agent
 
 const notion = new Client({ auth: NOTION_TOKEN, notionVersion: "2025-09-03" });
 const app = new Hono();
@@ -672,6 +674,26 @@ async function tgSend(chatId: number, html: string) {
     if (/can't parse entities/i.test(String(e?.message))) await tgApi("sendMessage", { chat_id: chatId, text: html.replace(/<[^>]+>/g, "") }).catch(() => {});
   }
 }
+/** 纯文本发送（agent 的回答带 markdown，走 HTML 解析容易炸），超长自动切段。 */
+async function tgSendPlain(chatId: number, text: string) {
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += 3900) chunks.push(text.slice(i, i + 3900));
+  for (const c of chunks.length ? chunks : ["（空）"]) {
+    try {
+      await tgApi("sendMessage", { chat_id: chatId, text: c, disable_web_page_preview: true });
+    } catch (e: any) {
+      console.error("[tg] 发送失败", e?.message ?? e);
+    }
+  }
+}
+/** agent 跑起来可能要几十秒，期间每 4 秒续一次"正在输入"。 */
+function typingKeepalive(chatId: number): () => void {
+  const tick = () => void tgApi("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
+  tick();
+  const h = setInterval(tick, 4000);
+  return () => clearInterval(h);
+}
+
 /** 发给所有配对的对话；返回是否至少发出去一条。 */
 async function tgBroadcast(messages: string[]): Promise<boolean> {
   if (!TELEGRAM_BOT_TOKEN || !tgState.chats.length) return false;
@@ -679,10 +701,33 @@ async function tgBroadcast(messages: string[]): Promise<boolean> {
   return true;
 }
 
-/** 文字记录（没照片）：同一套提示词，告诉模型这是文字描述。 */
+/** 文字记录（没照片）：同一套提示词，告诉模型这是文字描述。用 Haiku 当"分拣员"：是记录就结构化，不是记录（提问 / 聊天 / 命令）就 other，交给 agent。 */
 async function analyzeText(text: string, iso: string): Promise<Analysis> {
-  const raw = await askModel(SYSTEM_PROMPT, `${userPrompt(iso)}\n这次没有照片，用户用文字描述：「${text}」。按同样的 JSON 格式输出；文字说不清份量就填 中。`, 700, VISION_MODEL);
-  return parseAnalysis(raw);
+  const raw = await askModel(
+    SYSTEM_PROMPT,
+    `${userPrompt(iso)}\n这次没有照片，用户发来一句话：「${text}」。\n只有当这句话是在**记录自己刚吃喝了什么或排便情况**时，才按同样的 JSON 格式输出（份量说不清就填 中）。如果它是提问、闲聊、命令、感想、或别的任何事，kind 一律填 "other"，不要猜。`,
+    700,
+    "claude-haiku-5-5",
+  );
+  const a = parseAnalysis(raw);
+  if (a.kind !== "stool" && a.kind !== "other" && !a.items.length) a.kind = "other"; // 没有具体食物就不算记录
+  return a;
+}
+
+/** 把一句话交给 OpenClaw 的 agent（有 Notion、记忆、技能），同一个 Telegram 对话 = 同一个会话。 */
+async function askAgent(chatId: number, text: string): Promise<string> {
+  if (!GATEWAY_TOKEN) throw new Error("没配 OPENCLAW_GATEWAY_TOKEN，转不了 agent");
+  const res = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${GATEWAY_TOKEN}`, "x-openclaw-agent-id": "main", "x-openclaw-message-channel": "telegram" },
+    body: JSON.stringify({ model: "openclaw", user: `telegram:${chatId}`, messages: [{ role: "user", content: text }] }),
+    signal: AbortSignal.timeout(240_000),
+  });
+  if (!res.ok) throw new Error(`agent ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data: any = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  const textOut = typeof content === "string" ? content : Array.isArray(content) ? content.map((c: any) => c?.text ?? "").join("") : "";
+  return textOut.trim() || "（agent 没有返回内容）";
 }
 async function processText(text: string, source: string): Promise<PhotoResult> {
   const t = localTime(new Date(), TZ);
@@ -692,7 +737,7 @@ async function processText(text: string, source: string): Promise<PhotoResult> {
   } catch (e: any) {
     return { ok: false, status: 502, message: `没记上：${modelErrorText(e)}` };
   }
-  if (analysis.kind === "other") return { ok: true, status: 200, message: "没看出是吃喝还是排便，没记。可以说得具体点，比如「午饭 一碗牛肉面」。", kind: "other" };
+  if (analysis.kind === "other") return { ok: true, status: 200, message: "", kind: "other" };
   const meal = analysis.kind === "meal" || analysis.kind === "drink" ? mealSlot(t.hour, t.minute) : null;
   if (meal === "夜宵" && !analysis.flags.includes("夜宵")) analysis.flags.push("夜宵");
   let notionUrl: string | null = null;
@@ -775,12 +820,31 @@ async function tgHandle(msg: any) {
     return;
   }
   if (typeof msg.text === "string" && msg.text.trim()) {
-    void tgApi("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
-    const r = await processText(msg.text.trim(), "Telegram");
-    await tgSend(chatId, recordReply(r));
+    const text = msg.text.trim();
+    const stop = typingKeepalive(chatId);
+    try {
+      const r = await processText(text, "Telegram");
+      if (r.kind !== "other") {
+        await tgSend(chatId, recordReply(r));
+        return;
+      }
+      if (!r.ok) {
+        await tgSend(chatId, recordReply(r)); // 模型挂了之类，直接说
+        return;
+      }
+      // 不是记录 → 交给 agent 聊 / 干活
+      try {
+        await tgSendPlain(chatId, await askAgent(chatId, text));
+      } catch (e: any) {
+        console.error("[tg] agent 失败", e?.message ?? e);
+        await tgSend(chatId, `agent 没回：${esc(String(e?.message ?? e).slice(0, 160))}`);
+      }
+    } finally {
+      stop();
+    }
     return;
   }
-  await tgSend(chatId, "发照片或文字我才能记。");
+  await tgSend(chatId, "发照片、文字，或者直接问我问题。");
 }
 
 async function tgPollLoop() {

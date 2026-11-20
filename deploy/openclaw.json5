@@ -14,6 +14,8 @@
     trustedProxies: [${OPENCLAW_TRUSTED_PROXIES_JSON}],  // Caddy 的固定 IP，见 deploy/vps/docker-compose.yml
     allowRealIpFallback: false,
     controlUi: { enabled: true },
+    // OpenAI 兼容的 /v1/chat/completions：Telegram 健康 bot 把"聊天 / 指挥干活"类消息转给 agent 时走这个口（容器内网 + 网关 token）
+    http: { endpoints: { chatCompletions: { enabled: true } } },
   },
 
   agents: {
