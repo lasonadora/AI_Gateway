@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { quoteFromCloses, parseYahooChart, parseStooqCsv, parseCnbcQuotes, updateHistory, changesFromHistory, parseRss, dedupeNews, parseBrief, clampChinese, fallbackMarket, briefBlocks, briefProps, briefUserPrompt, type Quote, type NewsItem } from "./brief.ts";
+import { quoteFromCloses, parseYahooChart, parseStooqCsv, parseCnbcQuotes, cnbcSessionDate, updateHistory, changesFromHistory, parseRss, dedupeNews, parseBrief, clampChinese, fallbackMarket, briefBlocks, briefProps, briefUserPrompt, type Quote, type NewsItem } from "./brief.ts";
 
 test("quoteFromCloses：涨跌、5 日、1 月", () => {
   const closes = Array.from({ length: 25 }, (_, i) => 100 + i); // 100..124
@@ -125,8 +125,23 @@ test("parseCnbcQuotes + 本地历史：带逗号的字符串、盘前、5 日/1 
   assert.deepEqual(changesFromHistory(10, "2026-11-18", undefined), { d5: null, m1: null });
 });
 
+test("CNBC 盘前归零：日期只有 YYYY-MM-DD、change 为 0、prev==last → 用历史里上一交易日算涨跌", () => {
+  assert.deepEqual(cnbcSessionDate("2026-11-18", 0).date, "2026-11-18");
+  assert.equal(cnbcSessionDate("2026-11-19T16:00:00.000-0500", 0).date, "2026-11-19");
+  assert.equal(cnbcSessionDate(undefined, 1763499600).date, "2025-11-18");
+  const pre = { FormattedQuoteResult: { FormattedQuote: [{ symbol: "TSLA", last: "383.72", previous_day_closing: "383.72", change_pct: "0", last_time: "2026-11-18" }] } };
+  const noHist = parseCnbcQuotes(pre, {}).quotes[0];
+  assert.equal(noHist.session_date, "2026-11-18");
+  assert.equal(noHist.change_pct, null, "没有历史就别编一个 0.0%");
+  const withHist = parseCnbcQuotes(pre, { TSLA: [{ date: "2026-11-17", close: 380 }, { date: "2026-11-18", close: 383.72 }] }).quotes[0];
+  assert.equal(withHist.prev, 380);
+  assert.equal(withHist.change_pct, 1.0);
+  const h = updateHistory({}, [withHist]);
+  assert.deepEqual(h.TSLA, [{ date: "2026-11-18", close: 383.72 }]);
+});
+
 test("fallbackMarket / blocks / props / prompt 形状", () => {
-  const q: Quote = { symbol: "TSLA", name: "Tesla", currency: "USD", last: 412.3, prev: 417.1, change_pct: -1.2, change_5d_pct: 3.4, change_1m_pct: -5, as_of: "11-18 16:00 ET", as_of_epoch: 1, high_52w: 500, low_52w: 200 };
+  const q: Quote = { symbol: "TSLA", name: "Tesla", currency: "USD", last: 412.3, prev: 417.1, change_pct: -1.2, session_date: "2026-11-18", change_5d_pct: 3.4, change_1m_pct: -5, as_of: "11-18 16:00 ET", as_of_epoch: 1, high_52w: 500, low_52w: 200 };
   assert.equal(fallbackMarket([q], ["SPCX"]), "TSLA 412.3 -1.2%；行情暂缺：SPCX。");
   const brief = { market: "第一段。\n第二段。", news: [{ title: "标题", source: "BBC", url: "https://x", why: "原因" }], from_model: true };
   const blocks = briefBlocks(brief, [q], ["TSLA", "SPCX"]);

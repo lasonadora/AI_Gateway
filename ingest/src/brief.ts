@@ -9,7 +9,8 @@ export interface Quote {
   currency: string;
   last: number; // 最新（盘中为实时，盘前/盘后为上一收盘）
   prev: number; // 上一个收盘
-  change_pct: number; // last 相对 prev
+  change_pct: number | null; // 上一交易日涨跌；盘前 CNBC 归零且没有历史时为 null
+  session_date: string; // 这组数字对应的交易日（纽约日期）
   change_5d_pct: number | null;
   change_1m_pct: number | null;
   as_of: string; // 本地（纽约）时间字符串，如 "11-18 16:00 ET"
@@ -59,6 +60,7 @@ export function quoteFromCloses(symbol: string, rawCloses: Array<number | null>,
     last: r2(last),
     prev: r2(prev),
     change_pct: pct(last, prev),
+    session_date: nyDate(epoch),
     change_5d_pct: c5 ? pct(last, c5) : null,
     change_1m_pct: c21 ? pct(last, c21) : null,
     as_of: nyTime(epoch),
@@ -132,7 +134,18 @@ export function changesFromHistory(last: number, lastDate: string, hist: HistPoi
   return { d5: p5 ? pct(last, p5.close) : null, m1: p21 ? pct(last, p21.close) : null };
 }
 
-/** CNBC restQuote 接口（symbols 用 | 连接）。字段是带逗号的字符串。 */
+/** CNBC 的 last_time 收盘后是完整 ISO（带 -0500），盘前会退化成只有日期 "2026-11-18"；只有日期时直接当纽约日期用，别过 Date.parse（会变成 UTC 午夜 → 纽约前一天）。 */
+export function cnbcSessionDate(lastTime: unknown, fallbackEpoch: number): { date: string; epoch: number } {
+  const str = typeof lastTime === "string" ? lastTime.trim() : "";
+  const dateOnly = str.match(/^(\d{4}-\d{2}-\d{2})$/);
+  if (dateOnly) return { date: dateOnly[1], epoch: Math.floor(Date.parse(`${dateOnly[1]}T16:00:00-05:00`) / 1000) };
+  const t = str ? Date.parse(str) : NaN;
+  const epoch = Number.isNaN(t) ? fallbackEpoch : Math.floor(t / 1000);
+  return { date: nyDate(epoch), epoch };
+}
+
+/** CNBC restQuote 接口（symbols 用 | 连接）。字段是带逗号的字符串。
+ *  盘前阶段 CNBC 会把 change 归零、previous_day_closing 改成等于 last；这时用自己攒的历史里"上一个交易日"的收盘来算日涨跌。 */
 export function parseCnbcQuotes(json: any, history: History = {}): { quotes: Quote[]; extended: Record<string, string> } {
   const list: any[] = json?.FormattedQuoteResult?.FormattedQuote ?? [];
   const quotes: Quote[] = [];
@@ -140,19 +153,28 @@ export function parseCnbcQuotes(json: any, history: History = {}): { quotes: Quo
   for (const q of list) {
     const symbol = String(q.symbol ?? "").toUpperCase();
     const last = num(q.last);
-    const prev = num(q.previous_day_closing);
-    if (!symbol || last === null || prev === null) continue;
-    const t = q.last_time ? Date.parse(q.last_time) : NaN;
-    const epoch = Number.isNaN(t) ? Math.floor(Date.now() / 1000) : Math.floor(t / 1000);
-    const lastDate = nyDate(epoch);
+    let prev = num(q.previous_day_closing);
+    if (!symbol || last === null) continue;
+    const { date: lastDate, epoch } = cnbcSessionDate(q.last_time ?? q.last_timedate, Math.floor(Date.now() / 1000));
+    let change_pct = num(q.change_pct);
+    const reset = (change_pct === null || change_pct === 0) && (prev === null || prev === last);
+    if (reset) {
+      const before = (history[symbol] ?? []).filter((h) => h.date < lastDate).sort((a, b) => a.date.localeCompare(b.date));
+      const p = before.length ? before[before.length - 1].close : null;
+      prev = p;
+      change_pct = p === null ? null : pct(last, p);
+    } else if (change_pct === null && prev !== null) {
+      change_pct = pct(last, prev);
+    }
     const { d5, m1 } = changesFromHistory(last, lastDate, history[symbol]);
     quotes.push({
       symbol,
       name: q.name ?? q.shortName ?? null,
       currency: "USD",
       last: r2(last),
-      prev: r2(prev),
-      change_pct: num(q.change_pct) ?? pct(last, prev),
+      prev: prev === null ? r2(last) : r2(prev),
+      change_pct,
+      session_date: lastDate,
       change_5d_pct: d5,
       change_1m_pct: m1,
       as_of: nyTime(epoch),
@@ -172,7 +194,7 @@ export function parseCnbcQuotes(json: any, history: History = {}): { quotes: Quo
 export function updateHistory(history: History, quotes: Quote[]): History {
   const out: History = { ...history };
   for (const q of quotes) {
-    const date = nyDate(q.as_of_epoch);
+    const date = q.session_date;
     const arr = [...(out[q.symbol] ?? [])].filter((h) => h.date !== date);
     arr.push({ date, close: q.last });
     arr.sort((a, b) => a.date.localeCompare(b.date));
@@ -249,11 +271,11 @@ export function briefUserPrompt(date: string, quotes: Quote[], tickerNews: Recor
   const q = quotes.map((x) => ({
     symbol: x.symbol,
     name: x.name,
-    last: x.last,
-    change_pct: x.change_pct,
+    session_date: x.session_date,
+    close: x.last,
+    change_pct: x.change_pct, // null = 这个交易日的涨跌拿不到（盘前被归零且没有历史），就别写涨跌
     change_5d_pct: x.change_5d_pct,
     change_1m_pct: x.change_1m_pct,
-    as_of: x.as_of,
     extended_hours: extended[x.symbol] ?? null,
     high_52w: x.high_52w,
     low_52w: x.low_52w,
@@ -264,7 +286,7 @@ export function briefUserPrompt(date: string, quotes: Quote[], tickerNews: Recor
   return [
     `日期：${date}（北京时间）。`,
     failed.length ? `这些标的行情没取到，直接写"行情暂缺"：${failed.join(", ")}` : "",
-    `行情（代码算好的，as_of 是纽约时间）：\n${JSON.stringify(q)}`,
+    `行情（代码算好的；session_date 是这组收盘数字对应的交易日，close 是该日收盘；change_pct 为 null 就只写收盘价不写涨跌）：\n${JSON.stringify(q)}`,
     `各标的最近新闻标题：\n${JSON.stringify(tn)}`,
     `世界新闻（[编号] 标题 | 来源 | 时间）：\n${wn.join("\n")}`,
   ]
@@ -328,7 +350,7 @@ export function briefBlocks(brief: Brief, quotes: Quote[], tickers: string[]): a
   if (quotes.length) {
     const line = quotes.map((q) => `${q.symbol} ${q.last} ${fmtPct(q.change_pct)}（5日 ${fmtPct(q.change_5d_pct)} · 1月 ${fmtPct(q.change_1m_pct)}）`).join("　");
     out.push(block("paragraph", [txt(line)], { color: "gray" }));
-    out.push(block("paragraph", [txt(`数据截至 ${quotes[0].as_of}（纽约时间）`)], { color: "gray" }));
+    out.push(block("paragraph", [txt(`收盘数据对应交易日 ${quotes[0].session_date}（纽约）；5 日 / 1 月涨跌要攒够收盘历史才显示`)], { color: "gray" }));
   }
   for (const para of brief.market.split(/\n+/).filter((p) => p.trim())) out.push(block("paragraph", [txt(para.trim())]));
 

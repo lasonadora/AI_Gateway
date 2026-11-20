@@ -16,6 +16,7 @@ import { aggregate, type Daily } from "./hae.ts";
 import { SYSTEM_PROMPT, userPrompt, parseAnalysis, mealSlot, localTime, notionType, iconFor, type Analysis } from "./photo.ts";
 import { fromNotionPage, dayWindow, summarize, REPORT_SYSTEM_PROMPT, reportUserPrompt, parseNarrative, pushText, reportBlocks, reportProps, type DayStats, type Narrative } from "./report.ts";
 import { DEFAULT_TICKERS, NEWS_QUERY, parseYahooChart, parseCnbcQuotes, updateHistory, parseRss, dedupeNews, BRIEF_SYSTEM_PROMPT, briefUserPrompt, parseBrief, fallbackMarket, briefBlocks, briefProps, type Quote, type NewsItem, type Brief, type History } from "./brief.ts";
+import { parseCommand, reportMessages, recordReply, esc, HELP_TEXT, PAIR_HINT } from "./telegram.ts";
 
 const env = (k: string, required = true): string => {
   const v = process.env[k];
@@ -40,6 +41,8 @@ const STATE_FILE = join(PHOTO_DIR, "report-state.json");
 // 日报里的市场 + 新闻小节：BRIEF_TICKERS 设成空字符串即关闭
 const BRIEF_TICKERS = (process.env.BRIEF_TICKERS ?? DEFAULT_TICKERS.join(",")).split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 const BRIEF_MAX_CHARS = Number(process.env.BRIEF_MAX_CHARS) > 0 ? Number(process.env.BRIEF_MAX_CHARS) : 500;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ""; // 健康记录 bot；空 = 不启用
+const TG_STATE_FILE = join(PHOTO_DIR, "telegram-state.json");
 
 const notion = new Client({ auth: NOTION_TOKEN, notionVersion: "2025-09-03" });
 const app = new Hono();
@@ -48,16 +51,48 @@ const authed = (c: any) => (c.req.header("authorization") ?? "") === `Bearer ${I
 
 // ---------- 文本模型（日报点评） ----------
 
-async function askModel(system: string, user: string, maxTokens = 600): Promise<string> {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-    body: JSON.stringify({ model: REPORT_MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
-  });
-  if (!res.ok) throw new Error(`模型调用失败 ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const data: any = await res.json();
-  return (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+export class ModelError extends Error {
+  status: number;
+  kind: "credit" | "auth" | "rate" | "server" | "other";
+  constructor(status: number, body: string) {
+    super(`模型调用失败 ${status}: ${body.slice(0, 300)}`);
+    this.status = status;
+    this.kind = /credit balance/i.test(body) ? "credit" : status === 401 || status === 403 ? "auth" : status === 429 ? "rate" : status >= 500 ? "server" : "other";
+  }
+  /** 给人看的一句话 */
+  human(): string {
+    return this.kind === "credit"
+      ? "Anthropic API 额度用完了（console.anthropic.com → Plans & Billing 充值）"
+      : this.kind === "auth"
+        ? "Anthropic API key 无效或被撤销"
+        : this.kind === "rate"
+          ? "Anthropic API 限流"
+          : this.kind === "server"
+            ? "Anthropic API 服务端错误"
+            : `Anthropic API 返回 ${this.status}`;
+  }
 }
+
+/** 文本模型调用：限流 / 5xx 重试两次；额度用完或 key 错不重试，直接抛 ModelError 让上层写进报告。 */
+async function askModel(system: string, user: string, maxTokens = 600, model = REPORT_MODEL): Promise<string> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 3000 * attempt));
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      return (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    }
+    lastErr = new ModelError(res.status, await res.text());
+    if (lastErr.kind !== "rate" && lastErr.kind !== "server") break;
+  }
+  throw lastErr;
+}
+const modelErrorText = (e: any) => (e instanceof ModelError ? e.human() : String(e?.message ?? e).slice(0, 120));
 
 // ---------- 手机推送（Bark） ----------
 
@@ -136,7 +171,7 @@ async function analyzePhoto(jpeg: Buffer, localIso: string, note?: string): Prom
       ],
     }),
   });
-  if (!res.ok) throw new Error(`模型调用失败 ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new ModelError(res.status, await res.text());
   const data: any = await res.json();
   const raw = (data.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
   return { analysis: parseAnalysis(raw), raw };
@@ -153,14 +188,14 @@ async function uploadToNotion(jpeg: Buffer, filename: string): Promise<string> {
   return created.id as string;
 }
 
-function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: string | null, filename: string) {
+function logProps(a: Analysis, iso: string, meal: string | null, fileUploadId: string | null, filename: string, source = "手机拍照") {
   const sel = (name: string | null) => (name ? { select: { name } } : undefined);
   const multi = (names: string[]) => (names.length ? { multi_select: names.map((name) => ({ name })) } : undefined);
   const p: Record<string, any> = {
     text: { title: [{ text: { content: a.title } }] },
     datetime: { date: { start: iso } },
     type: { select: { name: notionType(a.kind, a.categories) } },
-    source: { select: { name: "手机拍照" } },
+    source: { select: { name: source } },
     confidence: { number: Math.round(a.confidence * 100) / 100 },
     agent_note: { rich_text: [{ text: { content: `${a.notes} [${VISION_MODEL}]`.slice(0, 1900) } }] },
   };
@@ -214,14 +249,23 @@ app.post("/ingest/hae", async (c) => {
 });
 
 // multipart/form-data：photo=<文件>，可选 note=<文字>，可选 taken_at=<ISO 时间>
-app.post("/ingest/photo", async (c) => {
-  if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
-  const body = await c.req.parseBody();
-  const file = body["photo"];
-  if (!(file instanceof File)) return c.json({ error: "缺少 photo 文件字段" }, 400);
-  const note = typeof body["note"] === "string" ? (body["note"] as string) : undefined;
-  const takenAt = typeof body["taken_at"] === "string" && !Number.isNaN(Date.parse(body["taken_at"] as string)) ? new Date(body["taken_at"] as string) : new Date();
+interface PhotoResult {
+  ok: boolean;
+  status: number; // 给 HTTP 用
+  message: string; // 给人看的几行字
+  kind?: Analysis["kind"];
+  title?: string;
+  meal?: string | null;
+  analysis?: Analysis;
+  notion_url?: string | null;
+  red_flag?: boolean;
+}
 
+/** 一张照片的完整流程：落盘 → 转 JPEG → 看图 → 写 Notion → 流水。HTTP 入口和 Telegram 入口共用。 */
+async function processPhoto(original: Buffer, opts: { ext?: string; note?: string; takenAt?: Date; source?: string }): Promise<PhotoResult> {
+  const takenAt = opts.takenAt ?? new Date();
+  const note = opts.note;
+  const source = opts.source ?? "手机拍照";
   const t = localTime(takenAt, TZ);
   const id = randomUUID().slice(0, 8);
   const dir = join(PHOTO_DIR, t.ymd.slice(0, 4), t.ymd.slice(5, 7), t.ymd.slice(8, 10));
@@ -229,8 +273,7 @@ app.post("/ingest/photo", async (c) => {
   const stem = `${t.iso.slice(11, 19).replace(/:/g, "")}-${id}`;
 
   // 1) 原图落盘（全部数据都留着，和 Notion 无关）
-  const original = Buffer.from(await file.arrayBuffer());
-  const ext = (file.name?.split(".").pop() || "bin").toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+  const ext = (opts.ext || "bin").toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
   await writeFile(join(dir, `${stem}.orig.${ext}`), original);
 
   // 2) 转成模型能吃的 JPEG（长边 ≤1568，按 EXIF 转正）。HEIC 转不了就明说。
@@ -239,7 +282,7 @@ app.post("/ingest/photo", async (c) => {
     jpeg = await sharp(original).rotate().resize({ width: 1568, height: 1568, fit: "inside", withoutEnlargement: true }).jpeg({ quality: 85 }).toBuffer();
   } catch (e: any) {
     console.error("[photo] 转码失败", e?.message ?? e);
-    return c.json({ error: "图片格式不支持（HEIC？）。请在快捷指令里加「转换图片 → JPEG」后再上传。" }, 415);
+    return { ok: false, status: 415, message: "图片格式不支持（HEIC？）。请在快捷指令里加「转换图片 → JPEG」后再上传。" };
   }
   await writeFile(join(dir, `${stem}.jpg`), jpeg);
 
@@ -250,8 +293,8 @@ app.post("/ingest/photo", async (c) => {
     ({ analysis, raw } = await analyzePhoto(jpeg, t.iso, note));
   } catch (e: any) {
     console.error("[photo] 识别失败", e?.message ?? e);
-    await appendFile(join(PHOTO_DIR, "log.jsonl"), JSON.stringify({ at: t.iso, file: `${stem}.jpg`, error: String(e?.message ?? e) }) + "\n");
-    return c.json({ error: `识别失败：${e?.message ?? e}` }, 502);
+    await appendFile(join(PHOTO_DIR, "log.jsonl"), JSON.stringify({ at: t.iso, file: `${stem}.jpg`, source, error: String(e?.message ?? e) }) + "\n");
+    return { ok: false, status: 502, message: `识别失败：${modelErrorText(e)}。照片已留档，不会丢。` };
   }
   const meal = analysis.kind === "meal" || analysis.kind === "drink" ? mealSlot(t.hour, t.minute) : null;
   if (meal === "夜宵" && !analysis.flags.includes("夜宵")) analysis.flags.push("夜宵");
@@ -270,7 +313,7 @@ app.post("/ingest/photo", async (c) => {
       const page: any = await notion.pages.create({
         parent: { type: "data_source_id", data_source_id: LOG_DS },
         icon: { type: "emoji", emoji: iconFor(analysis.kind) },
-        properties: logProps(analysis, t.iso, meal, uploadId, `${stem}.jpg`),
+        properties: logProps(analysis, t.iso, meal, uploadId, `${stem}.jpg`, source),
         children: logBody(analysis, note),
       } as any);
       notionUrl = page.url ?? null;
@@ -283,30 +326,45 @@ app.post("/ingest/photo", async (c) => {
   // 5) 本机流水（JSONL），永远写
   await appendFile(
     join(PHOTO_DIR, "log.jsonl"),
-    JSON.stringify({ at: t.iso, file: `${t.ymd}/${stem}.jpg`, note, meal, ...analysis, notion: notionUrl, notion_error: notionError, raw: raw.slice(0, 2000) }) + "\n",
+    JSON.stringify({ at: t.iso, file: `${t.ymd}/${stem}.jpg`, source, note, meal, ...analysis, notion: notionUrl, notion_error: notionError, raw: raw.slice(0, 2000) }) + "\n",
   );
-  console.log(`[photo] ${t.iso} ${analysis.kind} "${analysis.title}" conf=${analysis.confidence} notion=${notionUrl ?? notionError ?? "skip"}`);
+  console.log(`[photo] ${t.iso} ${source} ${analysis.kind} "${analysis.title}" conf=${analysis.confidence} notion=${notionUrl ?? notionError ?? "skip"}`);
 
-  // 带血 / 黑便：不等日报，立刻推一条（配了 Bark 才会推）
-  // 6) 给手机的一句话
+  // 6) 给人看的几行字
   const headline =
     analysis.kind === "other"
       ? "没认出是饭还是排便，照片已留档"
       : analysis.kind === "stool"
         ? `排便 · Bristol ${analysis.bristol ?? "?"}${analysis.flags.length ? ` · ${analysis.flags.join("/")}` : ""}`
         : `${meal ?? ""} ${analysis.title}${analysis.calorie_band ? ` · ${analysis.calorie_band}` : ""}`.trim();
-  const message = [headline, analysis.notes, notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
+  const message = [headline, analysis.notes, analysis.red_flag ? "⚠️ 建议尽快就医，这不是诊断。" : "", notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
 
-  // 7) 服务器直接推一条到手机（配了 Bark 才推）。快捷指令自己的"显示通知"在专注模式 / 停用时间下会被吞掉，
-  //    这条走 APNs 的时效性通知能穿过去。带血 / 黑便时标题换成警示，不再另发一条。
-  void pushPhone(
-    analysis.red_flag ? "⚠️ 排便记录有异常标记" : `已记录 · ${analysis.kind === "stool" ? "排便" : analysis.kind === "other" ? "照片" : (meal ?? "饮食")}`,
-    analysis.red_flag ? `${headline}\n建议尽快就医，这不是诊断。` : message,
-    notionUrl,
-    "timeSensitive",
-  );
+  // 7) Bark（可选）。Telegram 入口自己回消息，不走这里。
+  if (source !== "Telegram") {
+    void pushPhone(
+      analysis.red_flag ? "⚠️ 排便记录有异常标记" : `已记录 · ${analysis.kind === "stool" ? "排便" : analysis.kind === "other" ? "照片" : (meal ?? "饮食")}`,
+      message,
+      notionUrl,
+      "timeSensitive",
+    );
+  } else if (analysis.red_flag) {
+    void pushPhone("⚠️ 排便记录有异常标记", message, notionUrl, "timeSensitive");
+  }
 
-  return c.json({ ok: !notionError, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl });
+  return { ok: !notionError, status: notionError ? 207 : 200, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl, red_flag: analysis.red_flag };
+}
+
+app.post("/ingest/photo", async (c) => {
+  if (!authed(c)) return c.json({ error: "unauthorized" }, 401);
+  const body = await c.req.parseBody();
+  const file = body["photo"];
+  if (!(file instanceof File)) return c.json({ error: "缺少 photo 文件字段" }, 400);
+  const note = typeof body["note"] === "string" ? (body["note"] as string) : undefined;
+  const takenAt = typeof body["taken_at"] === "string" && !Number.isNaN(Date.parse(body["taken_at"] as string)) ? new Date(body["taken_at"] as string) : new Date();
+  const r = await processPhoto(Buffer.from(await file.arrayBuffer()), { ext: file.name?.split(".").pop(), note, takenAt, source: "手机拍照" });
+  if (!r.ok && r.status >= 400) return c.json({ error: r.message }, r.status as any);
+  void tgBroadcast([`📷 ${recordReply(r)}`]);
+  return c.json({ ok: r.ok, message: r.message, kind: r.kind, title: r.title, meal: r.meal, analysis: r.analysis, notion_url: r.notion_url });
 });
 
 // ---------- 市场 + 新闻（公开源，取不到就降级，不影响健康部分） ----------
@@ -359,7 +417,7 @@ async function fetchFeed(url: string, source: string): Promise<NewsItem[]> {
   }
 }
 
-async function buildBrief(ymd: string): Promise<{ brief: Brief; quotes: Quote[] } | null> {
+async function buildBrief(ymd: string): Promise<{ brief: Brief; quotes: Quote[]; model_error?: string } | null> {
   if (!BRIEF_TICKERS.length) return null;
   const history = await loadHistory();
   const [{ quotes, extended }, tickerNewsList, gn, bbc] = await Promise.all([
@@ -385,22 +443,43 @@ async function buildBrief(ymd: string): Promise<{ brief: Brief; quotes: Quote[] 
 
   const fb = fallbackMarket(quotes, failed);
   let brief: Brief;
+  let model_error: string | undefined;
   try {
     const raw = await askModel(BRIEF_SYSTEM_PROMPT.replace("{MAX}", String(Math.round(BRIEF_MAX_CHARS * 0.9))), briefUserPrompt(ymd, quotes, tickerNews, world, failed, extended), 2500);
     brief = parseBrief(raw, world, BRIEF_MAX_CHARS, fb);
     if (!brief.from_model) console.error("[brief] 模型输出不是合法 JSON：", raw.slice(0, 200));
   } catch (e: any) {
+    model_error = modelErrorText(e);
     console.error("[brief] 模型失败，用数字兜底", e?.message ?? e);
-    brief = { market: fb, news: [], from_model: false };
+    brief = { market: `${fb}（模型没跑成：${model_error}，今天只有数字）`, news: [], from_model: false };
   }
   console.log(`[brief] ${ymd} quotes=${quotes.length}/${BRIEF_TICKERS.length} world=${world.length} news=${brief.news.length} model=${brief.from_model}`);
-  return { brief, quotes };
+  return { brief, quotes, model_error };
+}
+
+/** 美股收盘后记一次收盘价进历史（每个交易日一次），日报的 5 日 / 1 月涨跌和盘前时段的日涨跌都靠它。 */
+async function snapshotCloses(): Promise<void> {
+  if (!BRIEF_TICKERS.length) return;
+  const history = await loadHistory();
+  const { quotes } = await fetchQuotes(BRIEF_TICKERS, history);
+  if (!quotes.length) throw new Error("没拿到行情");
+  await mkdir(PHOTO_DIR, { recursive: true });
+  await writeFile(HISTORY_FILE, JSON.stringify(updateHistory(history, quotes)));
+  console.log(`[brief] 收盘快照 ${quotes.map((q) => `${q.symbol}@${q.session_date}=${q.last}`).join(" ")}`);
+}
+
+function nyNow(): { date: string; hm: string } {
+  const d = new Date();
+  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  const g = (t: string) => f.formatToParts(d).find((p) => p.type === t)?.value ?? "00";
+  return { date: `${g("year")}-${g("month")}-${g("day")}`, hm: `${g("hour") === "24" ? "00" : g("hour")}:${g("minute")}` };
 }
 
 // ---------- 日报 ----------
 
 interface ReportState {
   last_daily?: string; // 最近一次自动日报的日期
+  last_close_snapshot?: string; // 最近一次收盘快照对应的纽约日期
   latest?: { date: string; title: string; body: string; summary: string; suggestion: string; notion_url: string | null; generated_at: string };
 }
 
@@ -467,6 +546,7 @@ async function runDailyReport(ymd: string, opts: { push: boolean; cutoff?: strin
     } catch (e: any) {
       console.error("[report] 模型失败，用规则兜底", e?.message ?? e);
       narrative = parseNarrative("", stats);
+      narrative.observations = [`模型没跑成（${modelErrorText(e)}），下面是规则生成的。`, ...narrative.observations].slice(0, 4);
     }
   }
 
@@ -481,7 +561,12 @@ async function runDailyReport(ymd: string, opts: { push: boolean; cutoff?: strin
   const notionUrl: string | null = page.url ?? null;
 
   const text = pushText(stats, narrative);
-  const pushed = opts.push ? await pushPhone(text.title, text.body, notionUrl, stats.red_flag ? "timeSensitive" : "active") : false;
+  let pushed = false;
+  if (opts.push) {
+    const tg = await tgBroadcast(reportMessages(stats, narrative, market?.brief ?? null, market?.quotes ?? [], notionUrl));
+    const bark = await pushPhone(text.title, text.body, notionUrl, stats.red_flag ? "timeSensitive" : "active");
+    pushed = tg || bark;
+  }
 
   const state = await loadState();
   state.latest = { date: ymd, ...text, summary: narrative.summary, suggestion: narrative.suggestion, notion_url: notionUrl, generated_at: new Date().toISOString() };
@@ -523,10 +608,22 @@ app.get("/ingest/report/latest", async (c) => {
 
 // 每 30 秒看一眼表：到点了、今天还没跑过 → 跑。容器重启错过了时间也会在当天补跑。
 async function tickScheduler() {
+  const state = await loadState();
+  // 1) 美股收盘后（16:35 纽约时间起）记一次收盘价；周末 CNBC 还是周五的日期，updateHistory 会去重
+  const ny = nyNow();
+  if (BRIEF_TICKERS.length && ny.hm >= "16:35" && state.last_close_snapshot !== ny.date) {
+    state.last_close_snapshot = ny.date;
+    await saveState(state);
+    try {
+      await snapshotCloses();
+    } catch (e: any) {
+      console.error("[brief] 收盘快照失败", e?.message ?? e);
+    }
+  }
+  // 2) 日报
   if (!REPORT_DS) return;
   const now = localTime(new Date(), TZ);
   if (now.iso.slice(11, 16) < REPORT_TIME) return;
-  const state = await loadState();
   if (state.last_daily === now.ymd) return;
   state.last_daily = now.ymd; // 先记账，失败也不要每 30 秒重试刷模型
   await saveState(state);
@@ -538,7 +635,178 @@ async function tickScheduler() {
 }
 setInterval(() => void tickScheduler().catch((e) => console.error("[report] tick", e)), 30_000);
 
-app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ, report_time: REPORT_TIME, report_db: Boolean(REPORT_DS), push: BARK_KEY ? "bark" : "none" }));
+
+// ---------- Telegram 健康记录 bot（长轮询，不需要公网回调；配了 TELEGRAM_BOT_TOKEN 才启动） ----------
+
+interface TgState {
+  chats: number[]; // 配对过的对话
+  offset: number; // getUpdates 游标
+}
+let tgState: TgState = { chats: [], offset: 0 };
+async function tgLoad() {
+  try {
+    tgState = { chats: [], offset: 0, ...JSON.parse(await readFile(TG_STATE_FILE, "utf8")) };
+  } catch {}
+}
+async function tgSave() {
+  await mkdir(PHOTO_DIR, { recursive: true });
+  await writeFile(TG_STATE_FILE, JSON.stringify(tgState));
+}
+async function tgApi(method: string, body: Record<string, unknown>, timeoutMs = 20_000): Promise<any> {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(`telegram ${method} ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+  return data.result;
+}
+async function tgSend(chatId: number, html: string) {
+  try {
+    await tgApi("sendMessage", { chat_id: chatId, text: html, parse_mode: "HTML", disable_web_page_preview: true });
+  } catch (e: any) {
+    console.error("[tg] 发送失败", e?.message ?? e);
+    // HTML 解析失败就退回纯文本
+    if (/can't parse entities/i.test(String(e?.message))) await tgApi("sendMessage", { chat_id: chatId, text: html.replace(/<[^>]+>/g, "") }).catch(() => {});
+  }
+}
+/** 发给所有配对的对话；返回是否至少发出去一条。 */
+async function tgBroadcast(messages: string[]): Promise<boolean> {
+  if (!TELEGRAM_BOT_TOKEN || !tgState.chats.length) return false;
+  for (const chat of tgState.chats) for (const m of messages) await tgSend(chat, m);
+  return true;
+}
+
+/** 文字记录（没照片）：同一套提示词，告诉模型这是文字描述。 */
+async function analyzeText(text: string, iso: string): Promise<Analysis> {
+  const raw = await askModel(SYSTEM_PROMPT, `${userPrompt(iso)}\n这次没有照片，用户用文字描述：「${text}」。按同样的 JSON 格式输出；文字说不清份量就填 中。`, 700, VISION_MODEL);
+  return parseAnalysis(raw);
+}
+async function processText(text: string, source: string): Promise<PhotoResult> {
+  const t = localTime(new Date(), TZ);
+  let analysis: Analysis;
+  try {
+    analysis = await analyzeText(text, t.iso);
+  } catch (e: any) {
+    return { ok: false, status: 502, message: `没记上：${modelErrorText(e)}` };
+  }
+  if (analysis.kind === "other") return { ok: true, status: 200, message: "没看出是吃喝还是排便，没记。可以说得具体点，比如「午饭 一碗牛肉面」。", kind: "other" };
+  const meal = analysis.kind === "meal" || analysis.kind === "drink" ? mealSlot(t.hour, t.minute) : null;
+  if (meal === "夜宵" && !analysis.flags.includes("夜宵")) analysis.flags.push("夜宵");
+  let notionUrl: string | null = null;
+  let notionError: string | null = null;
+  try {
+    const props = logProps(analysis, t.iso, meal, null, "", source);
+    const page: any = await notion.pages.create({ parent: { type: "data_source_id", data_source_id: LOG_DS }, icon: { type: "emoji", emoji: iconFor(analysis.kind) }, properties: props, children: logBody(analysis, text) } as any);
+    notionUrl = page.url ?? null;
+  } catch (e: any) {
+    notionError = String(e?.message ?? e);
+  }
+  await appendFile(join(PHOTO_DIR, "log.jsonl"), JSON.stringify({ at: t.iso, source, text, meal, ...analysis, notion: notionUrl, notion_error: notionError }) + "\n");
+  const headline = analysis.kind === "stool" ? `排便 · Bristol ${analysis.bristol ?? "?"}` : `${meal ?? ""} ${analysis.title}${analysis.calorie_band ? ` · ${analysis.calorie_band}` : ""}`.trim();
+  const message = [headline, analysis.notes, notionError ? `（Notion 写入失败：${notionError.slice(0, 80)}）` : ""].filter(Boolean).join("\n");
+  console.log(`[text] ${t.iso} ${source} ${analysis.kind} "${analysis.title}" notion=${notionUrl ?? notionError}`);
+  return { ok: !notionError, status: 200, message, kind: analysis.kind, title: analysis.title, meal, analysis, notion_url: notionUrl, red_flag: analysis.red_flag };
+}
+
+async function tgDownload(fileId: string): Promise<{ buf: Buffer; ext: string }> {
+  const f: any = await tgApi("getFile", { file_id: fileId });
+  const path: string = f.file_path;
+  const res = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${path}`, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`下载失败 ${res.status}`);
+  return { buf: Buffer.from(await res.arrayBuffer()), ext: path.split(".").pop() || "jpg" };
+}
+
+async function tgHandle(msg: any) {
+  const chatId: number = msg.chat?.id;
+  if (!chatId) return;
+  const paired = tgState.chats.includes(chatId);
+  const cmd = parseCommand(msg.text);
+
+  if (cmd?.name === "pair") {
+    if (cmd.arg && cmd.arg === INGEST_TOKEN) {
+      if (!paired) {
+        tgState.chats.push(chatId);
+        await tgSave();
+      }
+      await tgSend(chatId, "配对成功 ✅ 直接发照片或文字就能记。发 /help 看用法。");
+    } else await tgSend(chatId, "token 不对。格式：<code>/pair 你的INGEST_TOKEN</code>");
+    return;
+  }
+  if (!paired) {
+    await tgSend(chatId, PAIR_HINT);
+    return;
+  }
+  if (cmd?.name === "unpair") {
+    tgState.chats = tgState.chats.filter((c) => c !== chatId);
+    await tgSave();
+    await tgSend(chatId, "已取消配对。");
+    return;
+  }
+  if (cmd?.name === "start" || cmd?.name === "help") {
+    await tgSend(chatId, HELP_TEXT);
+    return;
+  }
+  if (cmd?.name === "report") {
+    await tgSend(chatId, "生成中，大概半分钟…");
+    try {
+      const ymd = /^\d{4}-\d{2}-\d{2}$/.test(cmd.arg) ? cmd.arg : localTime(new Date(), TZ).ymd;
+      await reportGuarded(ymd, { push: true });
+    } catch (e: any) {
+      await tgSend(chatId, `日报失败：${esc(String(e?.message ?? e).slice(0, 200))}`);
+    }
+    return;
+  }
+
+  const photo = Array.isArray(msg.photo) && msg.photo.length ? msg.photo[msg.photo.length - 1] : null;
+  const doc = msg.document && /^image\//.test(msg.document.mime_type ?? "") ? msg.document : null;
+  if (photo || doc) {
+    void tgApi("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
+    try {
+      const { buf, ext } = await tgDownload((photo ?? doc).file_id);
+      const takenAt = typeof msg.date === "number" ? new Date(msg.date * 1000) : new Date();
+      const r = await processPhoto(buf, { ext, note: msg.caption, takenAt, source: "Telegram" });
+      await tgSend(chatId, recordReply(r));
+    } catch (e: any) {
+      await tgSend(chatId, `没处理成：${esc(String(e?.message ?? e).slice(0, 200))}`);
+    }
+    return;
+  }
+  if (typeof msg.text === "string" && msg.text.trim()) {
+    void tgApi("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
+    const r = await processText(msg.text.trim(), "Telegram");
+    await tgSend(chatId, recordReply(r));
+    return;
+  }
+  await tgSend(chatId, "发照片或文字我才能记。");
+}
+
+async function tgPollLoop() {
+  await tgLoad();
+  console.log(`[tg] bot 启动，已配对对话 ${tgState.chats.length} 个`);
+  for (;;) {
+    try {
+      const updates: any[] = await tgApi("getUpdates", { offset: tgState.offset, timeout: 50, allowed_updates: ["message"] }, 65_000);
+      for (const u of updates) {
+        tgState.offset = Math.max(tgState.offset, u.update_id + 1);
+        try {
+          if (u.message) await tgHandle(u.message);
+        } catch (e: any) {
+          console.error("[tg] 处理消息失败", e?.message ?? e);
+        }
+      }
+      if (updates.length) await tgSave();
+    } catch (e: any) {
+      console.error("[tg] 轮询失败", e?.message ?? e);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+if (TELEGRAM_BOT_TOKEN) void tgPollLoop();
+
+app.get("/ingest/health", (c) => c.json({ ok: true, model: VISION_MODEL, tz: TZ, report_time: REPORT_TIME, report_db: Boolean(REPORT_DS), push: BARK_KEY ? "bark" : "none", telegram: TELEGRAM_BOT_TOKEN ? { enabled: true, paired_chats: tgState.chats.length } : { enabled: false } }));
 
 const port = Number(process.env.PORT ?? 8787);
-serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ} report=${REPORT_TIME} push=${BARK_KEY ? "bark" : "none"}`));
+serve({ fetch: app.fetch, port }, () => console.log(`[ingest] listening on ${port} model=${VISION_MODEL} tz=${TZ} report=${REPORT_TIME} push=${BARK_KEY ? "bark" : "none"} telegram=${TELEGRAM_BOT_TOKEN ? "on" : "off"}`));

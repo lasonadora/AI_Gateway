@@ -24,15 +24,19 @@ if [ "${#missing[@]}" -gt 0 ]; then
   done
 fi
 
-# 可选：手机推送（Bark）。没配就只写 Notion、不推手机；直接回车跳过。
-if [ -t 0 ] && ! has BARK_KEY; then
-  grep -q '^BARK_KEY=' .env || echo 'BARK_KEY=' >> .env
-  read -r -s -p "BARK_KEY（可选，iPhone 上 Bark app 的 device key；直接回车跳过）: " v; echo
+# 可选项：直接回车跳过。改了会重启服务。
+optional_secret() { # 变量名 提示语
+  local k="$1" prompt="$2" v
+  [ -t 0 ] || return 0
+  has "$k" && return 0
+  grep -q "^$k=" .env || echo "$k=" >> .env
+  read -r -s -p "$prompt（可选，直接回车跳过）: " v; echo
   v="${v//[$'\r\n\t ']/}"
-  if [ -n "$v" ]; then sed -i "s|^BARK_KEY=.*|BARK_KEY=$v|" .env; echo "BARK_KEY 已写入"; else echo "跳过手机推送"; fi
-fi
+  if [ -n "$v" ]; then sed -i "s|^$k=.*|$k=$v|" .env; echo "$k 已写入"; else echo "跳过 $k"; fi
+}
+optional_secret TELEGRAM_BOT_TOKEN "TELEGRAM_BOT_TOKEN：BotFather 给的 bot token，照片 / 文字记录 + 日报推送走 Telegram"
+optional_secret BARK_KEY "BARK_KEY：iPhone 上 Bark app 的 device key，另一种推送方式"
 
-echo "== 启动 =="
 docker compose up -d --build
 sleep 8
 docker compose ps
